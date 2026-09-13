@@ -1,0 +1,5 @@
+{
+  "preset": "ismip_greenland",
+  "resolution": 1000,
+  "_comment": "ISMIP6/ISMIP7 standard Greenland grid, EPSG:3413, cell centres on the nodes x in [-720, 960] km, y in [-3450, -570] km. resolution may be 1000/2000/4000/8000 and stays nested."
+}

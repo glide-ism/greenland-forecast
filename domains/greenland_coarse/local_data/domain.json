@@ -1,0 +1,6 @@
+{
+  "crs": "EPSG:3413",
+  "bbox": [-650675, -3376325, 875725, -640325],
+  "resolution": 1800,
+  "_comment": "Development domain bootstrapped from glide/data/GLIDE_greenland_inputs.h5 (900 m BedMachine + MEaSUREs 1995-2015 + MAR) block-averaged x2. Built by preprocessing/bootstrap_from_glide_example.py, which writes the grid directly; this spec only documents it."
+}

@@ -1,0 +1,34 @@
+# Dependencies for greenland-forecast (same stack as alaska-forecast).
+#
+#     pip install -r requirements.txt
+#
+# CuPy ships one wheel per CUDA major version: pick the line matching your
+# toolkit (cuda12 default). The geospatial stack (rasterio/rioxarray/
+# geopandas -> GDAL/PROJ) is easiest from conda-forge if pip wheels fail.
+
+# --- GPU: CuPy ---
+# cupy-cuda11x>=12.0.0
+cupy-cuda12x>=12.0.0
+# cupy-cuda13x>=13.0.0
+
+# --- custom libraries (github.com/glide-ism), tracking main ---
+glide @ git+https://github.com/glide-ism/glide.git@main
+glare @ git+https://github.com/glide-ism/glare.git@main
+ggapp @ git+https://github.com/glide-ism/ggapp.git@main
+gtic @ git+https://github.com/glide-ism/gtic.git@main
+
+# --- this repo's own direct dependencies ---
+pandas
+polars
+rasterio
+rioxarray
+shapely
+geopandas
+h5netcdf
+requests
+torch
+torchvision
+# NASA Earthdata (NSIDC) downloads for the manifest: `earthaccess`;
+# CDS downloads (CARRA / ERA5-Land): `cdsapi`.
+earthaccess
+cdsapi

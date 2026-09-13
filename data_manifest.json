@@ -1,0 +1,318 @@
+{
+ "version": "2026-09-08b",
+ "description": "Observational datasets for greenland-forecast. 'path' is relative to common_data/. See DATA_MANIFEST.md for detail.",
+ "crs": "EPSG:3413",
+ "datasets": [
+  {
+   "id": "bedmachine_v6",
+   "priority": "required",
+   "product": "IceBridge BedMachine Greenland v6 (file product_version v6.6, 2025-11-24)",
+   "doi": "see landing page (v5: 10.5067/GMEVBWFLWA7X)",
+   "url": "https://nsidc.org/data/idbmg4/versions/6",
+   "access": "earthdata",
+   "resolution_m": 150,
+   "path": "geometry/bedmachine/BedMachineGreenland-v6.nc",
+   "consumer": "preprocessing/make_dem.py",
+   "variables": [
+    "surface",
+    "bed",
+    "thickness",
+    "errbed",
+    "mask",
+    "source",
+    "dataid",
+    "geoid",
+    "rgi"
+   ],
+   "epoch": {
+    "surface_nominal": 2008,
+    "mask_nominal": 2015,
+    "source": "nominal_year attr"
+   },
+   "status": "on_disk"
+  },
+  {
+   "id": "measures_0725_2015_2016",
+   "priority": "required_one_of_velocity",
+   "product": "MEaSUREs Greenland Annual Ice Sheet Velocity Mosaics NSIDC-0725 v5, 2015-12..2016-11",
+   "doi": "10.5067/USBL3Z8KF9C3",
+   "url": "https://nsidc.org/data/nsidc-0725/versions/5",
+   "access": "earthdata",
+   "resolution_m": 200,
+   "path": "velocity/measures_0725/greenland_vel_mosaic200_2015_2016_{vx,vy,ex,ey}_v05.0.tif",
+   "consumer": "preprocessing/make_velocity.py --source measures_annual",
+   "epoch": {
+    "time_start": 2015.92,
+    "time_end": 2016.92
+   }
+  },
+  {
+   "id": "measures_0670",
+   "priority": "alternative",
+   "product": "MEaSUREs Multi-year Greenland Ice Sheet Velocity Mosaic NSIDC-0670 v1 (1995-2015)",
+   "doi": "10.5067/QUA5Q9SVMSJG",
+   "url": "https://nsidc.org/data/nsidc-0670/versions/1",
+   "access": "earthdata",
+   "resolution_m": 250,
+   "path": "velocity/measures_0670/greenland_vel_mosaic250_{vx,vy,ex,ey}_v1.tif",
+   "consumer": "preprocessing/make_velocity.py --source measures_multiyear"
+  },
+  {
+   "id": "itslive_rgi05a",
+   "priority": "required_one_of_velocity",
+   "product": "ITS_LIVE V02.1 120 m summary velocity mosaic RGI05A (2014-2024 climatology)",
+   "url": "https://its-live.jpl.nasa.gov/",
+   "aws": "s3://its-live-data/velocity_mosaic/v2/static/cog/",
+   "access": "open",
+   "resolution_m": 120,
+   "path": "velocity/itslive/ITS_LIVE_velocity_120m_RGI05A_0000_V02.1.nc",
+   "consumer": "preprocessing/make_velocity.py --source itslive (default)",
+   "status": "on_disk",
+   "epoch": {
+    "time_start": 2014,
+    "time_end": 2024,
+    "time_nominal": 2019
+   }
+  },
+  {
+   "id": "carra2_monthly",
+   "priority": "required",
+   "product": "CARRA2 pan-Arctic monthly temperature at 100 m and 500 m above ground, total precipitation (mm/day), orography; Greenland box; full record 1985-10..2025-12 (483 months) plus the original 27-month files",
+   "url": "https://cds.climate.copernicus.eu/datasets/reanalysis-carra-means",
+   "access": "cds",
+   "resolution_m": 2500,
+   "path": "climate/carra2/1985_2025/{t.nc, precip.nc}, climate/carra2/orog.nc",
+   "consumer": "preprocessing/make_carra_vars.py",
+   "status": "on_disk",
+   "note": "2 m temperature deliberately not used (boundary-layer melt depletion); local lapse from the two levels",
+   "epoch": {
+    "time_start": 1985,
+    "time_end": 2025
+   }
+  },
+  {
+   "id": "temperature_anomaly",
+   "priority": "required",
+   "product": "Vinther et al. (2006) SW Greenland monthly station composite 1784-2013 (the forcing series, JJA anomaly, CARRA2-extended to 2025); PAGES2k (2019) + HadCRUT5 global splice as --source global",
+   "url": "https://www.metoffice.gov.uk/hadobs/hadcrut5/",
+   "access": "open (copied from the alaska bundle)",
+   "path": "climate/temp_anomaly/swgreenlandave.dat; climate/temp_anomaly/{pages2k_ngeo19_recons.nc, HadCRUT.5.0.2.0.analysis.summary_series.global.annual.csv}",
+   "consumer": "preprocessing/make_temperature_anomaly.py",
+   "alternatives": [
+    "PAGES2k Arctic regional composite",
+    "Vinther et al. 2010 Greenland ice-core stack",
+    "Box et al. 2009 Greenland temperature 1840-2007"
+   ],
+   "status": "on_disk",
+   "note": "configs use base_anomaly_year=None and alpha_t2m=0.6 (RACMO JJA regressed on Vinther JJA: 0.58 ice-sheet mean)"
+  },
+  {
+   "id": "basins_mouginot_rignot",
+   "priority": "recommended",
+   "product": "Glacier catchments/basins for the Greenland Ice Sheet v1.4.2 (Mouginot & Rignot 2019)",
+   "doi": "10.7280/D1WT11",
+   "url": "https://datadryad.org/dataset/doi:10.7280/D1WT11",
+   "access": "open",
+   "path": "area/basins/Greenland_Basins_PS_v1.4.2.shp",
+   "consumer": "preprocessing/make_dem.py (rgi_label)",
+   "status": "on_disk",
+   "fields": [
+    "SUBREGION1",
+    "NAME",
+    "GL_TYPE"
+   ],
+   "crs": "EPSG:3413",
+   "n": 260
+  },
+  {
+   "id": "rgi6_region05",
+   "priority": "recommended",
+   "product": "Randolph Glacier Inventory 6.0, region 05 Greenland Periphery (NSIDC-0770 v6)",
+   "doi": "10.7265/4m1f-gd79",
+   "url": "https://nsidc.org/data/nsidc-0770/versions/6",
+   "access": "open",
+   "path": "area/rgi/05_rgi60_GreenlandPeriphery.shp",
+   "consumer": "preprocessing/make_dem.py (labels, surge_type)",
+   "status": "on_disk",
+   "fields": [
+    "RGIId",
+    "Surging",
+    "Connect",
+    "TermType"
+   ],
+   "note": "RGI 7.0 also accepted by make_dem.py"
+  },
+  {
+   "id": "atl15_v5",
+   "priority": "recommended_one_of_dhdt",
+   "product": "ICESat-2 ATL15 v5 gridded land ice height change, Greenland 1 km, cycles 03-29",
+   "doi": "10.5067/ATLAS/ATL15.005",
+   "url": "https://nsidc.org/data/atl15/versions/5",
+   "access": "earthdata",
+   "resolution_m": 1000,
+   "path": "dhdt/atl15/ATL15_GL_0329_01km_005_02.nc",
+   "consumer": "preprocessing/make_dhdt.py --source atl15",
+   "epoch": {
+    "time_start": 2019.0,
+    "time_end": 2026.0,
+    "datum": "2020-01-01"
+   },
+   "status": "on_disk"
+  },
+  {
+   "id": "itslive_greenland_dh",
+   "priority": "recommended",
+   "product": "ITS_LIVE Greenland Ice Sheet and Peripheral Glacier Ice Elevation Change, MEaSUREs G1920V01 v1.1 (Nilsson & Gardner)",
+   "doi": "10.5067/ICFVI7DKHZJV",
+   "access": "earthdata",
+   "resolution_m": 1920,
+   "path": "dhdt/measures/Greenland_G1920V01_IceSheetGlacierIceHeight.nc",
+   "consumer": "preprocessing/make_dhdt.py --source itslive_dh --t0 2000 --t1 2020",
+   "epoch": {
+    "time_start": 1992.04,
+    "time_end": 2023.95,
+    "cadence": "monthly"
+   },
+   "variables": [
+    "dh",
+    "h",
+    "h_dem",
+    "rms",
+    "mask",
+    "dfac_gemb",
+    "dfac_gsfc"
+   ],
+   "status": "on_disk"
+  },
+  {
+   "id": "cci_sec",
+   "priority": "alternative",
+   "product": "ESA CCI Greenland Ice Sheet surface elevation change (radar altimetry, 5 km, 1992-present)",
+   "url": "http://products.esa-icesheets-cci.org/",
+   "access": "open",
+   "resolution_m": 5000,
+   "path": "dhdt/cci_sec/greenland_sec.nc",
+   "consumer": "preprocessing/make_dhdt.py --source gridded"
+  },
+  {
+   "id": "arcticdem_v41_100m",
+   "priority": "recommended",
+   "product": "ArcticDEM mosaic v4.1, 100 m (with count/mad/mindate/maxdate)",
+   "url": "https://data.pgc.umn.edu/elev/dem/setsm/ArcticDEM/mosaic/v4.1/100m/",
+   "access": "open",
+   "resolution_m": 100,
+   "path": "dem/arcticdem/arcticdem_mosaic_100m_v4.1_dem.tif",
+   "consumer": "preprocessing/make_dem.py (surface overlay)",
+   "epoch": {
+    "time_start": 2007,
+    "time_end": 2020,
+    "time_nominal": 2015
+   }
+  },
+  {
+   "id": "era5land_greenland",
+   "priority": "optional",
+   "product": "ERA5-Land monthly means, 2m_temperature + total_precipitation, Greenland box",
+   "url": "https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land-monthly-means",
+   "access": "cds",
+   "path": "climate/era5land/era5land_greenland.nc",
+   "consumer": "preprocessing/make_era5land_vars.py"
+  },
+  {
+   "id": "irmcr2",
+   "priority": "optional",
+   "product": "IceBridge MCoRDS L2 Ice Thickness v1 (+ pre-IceBridge BRMCR2)",
+   "doi": "10.5067/GDQ0CUCVTE2Q",
+   "url": "https://nsidc.org/data/irmcr2/versions/1",
+   "access": "earthdata",
+   "path": "flightlines/{irmcr2,brmcr2}/**/*.csv",
+   "consumer": "preprocessing/make_bedradar.py"
+  },
+  {
+   "id": "snowline_classification",
+   "priority": "optional",
+   "product": "End-of-summer snow / bare-ice classification GeoTIFFs (derive from MODIS: Ryan et al. 2019, MOD10A1/MCD43A3; or Sentinel-3 SICE)",
+   "url": "https://doi.org/10.1126/sciadv.aav3738",
+   "access": "derive",
+   "path": "snowlines/<YYYY-YYYY-average>/*.tif",
+   "consumer": "preprocessing/make_snowline.py"
+  },
+  {
+   "id": "accumulation_reconstruction",
+   "priority": "optional",
+   "product": "Greenland accumulation reconstruction (Box et al. 2013, 1600-2009) or ice-core annual accumulation (NGRIP/NEEM)",
+   "url": "https://doi.org/10.1175/JCLI-D-12-00373.1",
+   "access": "on request / NOAA Paleo",
+   "path": "climate/precip_anomaly/greenland_accumulation.csv",
+   "consumer": "preprocessing/make_precip_anomaly.py"
+  },
+  {
+   "id": "hugonnet_rgi05",
+   "priority": "optional",
+   "product": "Hugonnet et al. 2021 dh/dt 2000-2020 tiles, RGI region 05",
+   "url": "https://doi.org/10.6096/13",
+   "access": "open",
+   "path": "dhdt/hugonnet/{dhdt,dhdt_err}/*.tif",
+   "consumer": "preprocessing/make_dhdt.py --source hugonnet"
+  },
+  {
+   "id": "rcm_smb",
+   "priority": "forecast/validation",
+   "product": "MAR v3.12+ and RACMO2.3p2 1 km SMB",
+   "url": "https://doi.pangaea.de/10.1594/PANGAEA.904428",
+   "access": "open / on request",
+   "path": "smb/{mar,racmo}/",
+   "consumer": "validation; ISMIP7 reference climatology"
+  },
+  {
+   "id": "ismip7_forcing",
+   "priority": "forecast",
+   "product": "ISMIP7 Greenland MIPkit: SMB anomalies, ocean thermal forcing, retreat",
+   "url": "https://www.ismip.org/research/ismip7",
+   "access": "globus",
+   "path": "ismip7/",
+   "consumer": "forecast experiments (not yet wired)"
+  },
+  {
+   "id": "termini",
+   "priority": "forecast/optional",
+   "product": "TermPicks (Goliber et al. 2022) and MEaSUREs NSIDC-0642 terminus positions",
+   "url": "https://nsidc.org/data/nsidc-0642/versions/1",
+   "access": "open / earthdata",
+   "path": "termini/",
+   "consumer": "extent at epoch; calving validation"
+  },
+  {
+   "id": "racmo_era5_1km_monthly",
+   "priority": "suggested",
+   "product": "RACMO2.3p2-ERA5 statistically downscaled 1 km monthly tas (2 m air temperature), ts (tas clipped at 273.15 K) and pr (kg m-2 s-1), 1958-2025, ISMIP7 forcing kit on the ISMIP 1 km grid",
+   "url": "https://www.ismip.org/research/ismip7 (Globus MIPkit; source IMAU/B. Noel)",
+   "access": "globus",
+   "resolution_m": 1000,
+   "path": "climate/RACMO2.3p2-ERA/{tas,ts,pr}/*_GrIS_RACMO2.3p2-ERA_OCX_SDBN1-1000m_v1_{year}.nc",
+   "consumer": "analysis/compare_racmo_carra.py, analysis/arctic_amplification.py (amplification + optional hybrid pre-1958 reconstruction)",
+   "status": "on_disk",
+   "epoch": {
+    "time_start": 1958,
+    "time_end": 2025
+   },
+   "note": "analyses use tas; ts is censored at 0 C (thermal BC); precip conservative regrid"
+  },
+  {
+   "id": "ismip7_ocean_tf_en4",
+   "priority": "suggested",
+   "product": "ISMIP7 Greenland ocean thermal forcing, EN4-based (Verjans bias correction, Slater inland mapping), monthly 1 km 1950-2026, degC above freezing",
+   "url": "https://www.ismip.org/research/ismip7 (Globus MIPkit; NASA GSFC, github.com/ehultee/gris-iceocean-process)",
+   "access": "globus",
+   "resolution_m": 1000,
+   "path": "ocean/tf/tf_GrIS_EN4_OCX_ocean-1000m_v1_{year}.nc",
+   "consumer": "preprocessing/make_thermal_forcing.py -> model_inputs/thermal_forcing.nc -> forward_standalone.py (q = Q0 + alpha (TF - TF_ref))",
+   "status": "on_disk",
+   "epoch": {
+    "time_start": 1950,
+    "time_end": 2026
+   },
+   "note": "2026 file holds Jan-Feb only (skipped by make_thermal_forcing.py; complete years 1950-2025). NaN off the mapped ocean/fjord/under-ice region (~39% of grid); annual mean and max kept; tf_dist records distance to the native product"
+  }
+ ]
+}
