@@ -12,17 +12,27 @@ from preprocessing/make_thermal_forcing.py: annual mean and annual max of
 the monthly product per calendar year, `tf_dist` = distance to the native
 product):
 
-    q (x, t) = q0  + alpha_q * dTF(x, t)          alpha_q in 1/K
-    h0(x, t) = h00 + alpha_h * dTF(x, t)          alpha_h in m/K
-    dTF(x, t) = TF_step(x, t) - TF_ref(x)
+    q (x, t) = q0  + clim_q * (TF_clim(x) - tf_crit) + alpha_q * dTF(x, t)   [1/K]
+    h0(x, t) = h00 + clim_h * (TF_clim(x) - tf_crit) + alpha_h * dTF(x, t)   [m/K]
+    TF_clim(x) = mean of the annual statistic over `ref_years`
+    dTF(x, t)  = TF_step(x, t) - TF_clim(x)
+    tf_crit    = the critical thermal forcing: under the monotone calving law
+                 the sign of the margin at flotation decides whether a tongue
+                 is admissible, so fjords colder than tf_crit float, warmer
+                 ones calve above flotation
 
 TF_step aggregates the annual statistic (`statistic`: "max" -> annual max,
 "mean" -> annual mean) over the calendar years a step (t0, t1] overlaps:
-the maximum for "max", the overlap-weighted mean for "mean". TF_ref is the
-per-cell mean of the same statistic over `ref_years`, or the scalar
-`ref_value`. Steps before the record hold the reference (dTF = 0); after it
-the last year holds. dTF is zero (margins at their baselines) where the
-product is undefined or farther than `max_dist_km` from its native cells.
+the maximum for "max", the overlap-weighted mean for "mean". The clim
+coefficients give the baseline margins a TF-dependent geography (warm
+fjords closer to instability, cold fjords negative margins = persisting
+tongues); the alphas set the response to warming. clim = 0 recovers the
+pure anomaly model, clim = alpha the pure absolute one (which over-levers:
+fronts on either side of the zero crossing end up insensitively cold or
+contracted). Steps before the record see dTF = 0; after the record the
+last year holds. Both terms are zero (margins at their baselines) where
+the product is undefined or farther than `max_dist_km` from its native
+cells.
 
 The two knobs act differently across glacier sizes: alpha_q shifts the
 threshold by a fraction of the local thickness (deep, thick fronts respond
@@ -76,16 +86,12 @@ class OceanForcing:
         self.source = source
         finite = np.isfinite(self.stat).all(axis=0) & np.isfinite(dist)
         self.ok = finite & (dist <= cfg.max_dist_km)
-        if cfg.ref_value is not None:
-            self.ref = np.full(self.stat.shape[1:], float(cfg.ref_value), np.float32)
-        else:
-            y0, y1 = cfg.ref_years
-            sel = (self.years >= y0) & (self.years <= y1)
-            if not sel.any():
-                raise ValueError(f"ocean_forcing.ref_years {cfg.ref_years} outside the "
-                                 f"record {self.years[0]}-{self.years[-1]}")
-            self.ref = self.stat[sel].mean(axis=0)
-        self.ref = np.where(self.ok, self.ref, 0.0).astype(np.float32)
+        y0, y1 = cfg.ref_years
+        sel = (self.years >= y0) & (self.years <= y1)
+        if not sel.any():
+            raise ValueError(f"ocean_forcing.ref_years {cfg.ref_years} outside the "
+                             f"record {self.years[0]}-{self.years[-1]}")
+        self.clim = np.where(self.ok, self.stat[sel].mean(axis=0), 0.0).astype(np.float32)
         self._zero = np.zeros(self.stat.shape[1:], np.float32)
 
     @classmethod
@@ -109,14 +115,14 @@ class OceanForcing:
 
     def describe(self) -> str:
         c = self.cfg
-        ref = f"scalar {c.ref_value}" if c.ref_value is not None else f"mean over {c.ref_years}"
         return (f"ocean forcing: TF {self.years[0]}-{self.years[-1]} (tf_{c.statistic}), "
-                f"{int(self.ok.sum())} active cells within {c.max_dist_km:g} km, reference {ref}; "
-                f"q = {self.q0:g} + {c.alpha_q:g}/K * dTF in {c.q_bounds}, "
-                f"h0 = {self.h00:g} + {c.alpha_h:g} m/K * dTF in {c.h0_bounds}")
+                f"climatology {c.ref_years}, tf_crit {c.tf_crit:g} degC, {int(self.ok.sum())} active cells within {c.max_dist_km:g} km; "
+                f"q = {self.q0:g} + {c.clim_q:g}/K * (TF_clim - tf_crit) + {c.alpha_q:g}/K * dTF in {c.q_bounds}, "
+                f"h0 = {self.h00:g} + {c.clim_h:g} m/K * (TF_clim - tf_crit) + {c.alpha_h:g} m/K * dTF in {c.h0_bounds}")
 
     def anomaly(self, t0: float, t1: float) -> np.ndarray:
-        """dTF(x) for the step (t0, t1] on the fine grid; 0 where inactive."""
+        """dTF(x) = TF_step - TF_clim for the step (t0, t1] on the fine grid;
+        0 where inactive and before the record."""
         years, stat = self.years, self.stat
         ya, yb = int(years[0]), int(years[-1])
         overlap = [(min(y, yb), w) for y, w in year_overlap_weights(t0, t1) if y >= ya]
@@ -128,12 +134,14 @@ class OceanForcing:
         else:
             wsum = sum(w for _, w in overlap)
             agg = sum(w * stat[i] for (_, w), i in zip(overlap, idx)) / wsum
-        return np.where(self.ok, agg - self.ref, 0.0).astype(np.float32)
+        return np.where(self.ok, agg - self.clim, 0.0).astype(np.float32)
 
     def margins(self, t0: float, t1: float):
-        """(q, h0) fields (float32, fine grid) for the step (t0, t1]."""
+        """(q, h0, dTF) fields (float32, fine grid) for the step (t0, t1]:
+        baseline + clim * TF_clim + alpha * dTF, clipped to the bounds."""
         c = self.cfg
         dtf = self.anomaly(t0, t1)
-        q = np.clip(self.q0 + c.alpha_q * dtf, *c.q_bounds).astype(np.float32)
-        h0 = np.clip(self.h00 + c.alpha_h * dtf, *c.h0_bounds).astype(np.float32)
+        clim_rel = np.where(self.ok, self.clim - c.tf_crit, 0.0).astype(np.float32)
+        q = np.clip(self.q0 + c.clim_q * clim_rel + c.alpha_q * dtf, *c.q_bounds).astype(np.float32)
+        h0 = np.clip(self.h00 + c.clim_h * clim_rel + c.alpha_h * dtf, *c.h0_bounds).astype(np.float32)
         return q, h0, dtf

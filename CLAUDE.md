@@ -64,9 +64,23 @@ and forth by diff):
    + `config.calving_h0`, `ocean.py`, `forward.simulate(ocean_forcing=)`):
    glide's hybrid height-above-buoyancy threshold `H - H_f < q H + h0` gets
    `q = calving_q + alpha_q dTF`, `h0 = calving_h0 + alpha_h dTF` per step
-   from `model_inputs/thermal_forcing.nc` (dTF = the step's annual-mean or
-   annual-max TF anomaly vs a reference window, zero before the record and
-   farther than `max_dist_km` from the native product). alpha_q (1/K,
+   from `model_inputs/thermal_forcing.nc`, generalized 2026-09-14/17 to
+   `q = calving_q + clim_q (TF_clim - tf_crit) + alpha_q dTF` and
+   `h0 = calving_h0 + clim_h (TF_clim - tf_crit) + alpha_h dTF` — under the
+   monotone calving law the SIGN of the margin at flotation decides whether
+   a tongue is admissible, so `tf_crit` (3.5 degC in the configs) is the
+   critical thermal forcing: EN4 front climatologies Petermann 2.0, 79N 2.2,
+   Jakobshavn 3.8, Kangerlussuaq 4.3, Helheim 6.2 degC; clim_h 15 m/K and
+   alpha_h 50 m/K give margins of about -20 m Petermann, +5..+70 m
+   Jakobshavn, +40..+80 m Helheim — with TF_clim the
+   per-cell `ref_years` (1950-79) mean of the annual-mean or annual-max TF
+   (1-7 degC at the fronts, mean 3.8) and dTF the step's departure from it
+   (tenths of a degree; zero before the record and farther than
+   `max_dist_km` from the native product). The clim coefficients give the
+   baseline margins a TF-dependent geography; clim = 0 is the pure anomaly
+   model (the tuned one), clim = alpha the pure absolute model, which
+   over-levers (fronts either side of the zero crossing go insensitively
+   cold or contracted — tried and dropped 2026-09-14). alpha_q (1/K,
    scales with thickness) and alpha_h (m/K, same distance everywhere) are
    SWEEP parameters, not differentiated: psi is a ~1 m-wide switch in
    flotation excess, so dJ/dalpha would be supported on a handful of cells.
@@ -75,6 +89,19 @@ and forth by diff):
    `GlacierProblem.ocean_forcing` is the loaded forcing (None when disabled
    or the file is absent, with a warning); the same object drives
    `forward_standalone.py`.
+
+Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
+are frozen inputs to every glide stencil. The effective-pressure pathway is
+now differentiated — the drag Jacobians carry d(beta xi^p)/dH and /dbed via
+xi = 1 - depth/(r H) on grounded marine ice (stress.cu), `compute_gradient_bed`
+adds the drag term, and `tests/grad_bed_test.py` checks the bed gradient by
+finite differences on a marine geometry along long-wavelength bed modes
+(1% agreement; the old kernels recovered 46% of the gradient there).
+Still neglected: dpsi/dH, dpsi/dbed in the calving sink and dphi/dH,
+dphi/dbed in the driving stress (delta-like at sigmoid_c = 1/m: 4 and 214
+cells in the band), the active set (identity rows, by construction), the
+detached bed in `_initial_thickness_from_geometry`, and q/h0 (sweep
+parameters). `depth_blend` is now 1.0 (depth == -bed each forward call).
 
 Plus ONE non-additive change forced by glide's 2026-09 refactor (signed
 flotation excess + height-above-buoyancy calving; alaska-forecast has to
@@ -133,8 +160,45 @@ with `OCEAN = dataclasses.replace(...)`, baselines `Q0`/`H00`), so a driver
 experiment and the inversion see the identical margins. **glide changes
 2026-09-11: `calving.q` and the new additive margin `calving.h0` (m) are
 CELL FIELDS** (like `sliding.beta`; scalar `.set()` fills them, restricted
-by averaging; the flag is `psi = sigmoid(c (z - rho_i/rho_w (q H + h0)))`),
-and `GlideStep` checkpoints both with the step.
+by averaging), and `GlideStep` checkpoints both with the step. **2026-09-16: the
+calving criterion is the gap-blended monotone law** (`calving.H_c`, config
+`calving_H_c`, m; see the calving-law paragraph in the library section).
+**Calving law (2026-09-16, monotone form).** The phi-blended pair of
+criteria (grounded HAB law where phi -> 1, shelf minimum thickness where
+phi -> 0) was NON-MONOTONE in H at tongue roots: a root cell below the
+margin calved, thinned across flotation, was handed to the shelf branch
+which protected it, refilled and calved again, so the implicit thickness
+solve stalled at the V-cycle cap (94-100% of |r_H|^2 at tongue roots;
+lagging, relaxation, softening, the exact Jacobian in the Vanka patches,
+neighbourhood evaluation alone — all tried and rejected). glide now uses
+ONE criterion psi = sigmoid(c r (H - H_calve)) with the critical thickness
+blended by the gap between ice base and bed, `common.cu calving_F`:
+H_g = (depth/r + h0)/(1 - q), H_s = min(H_c, H_g), gap = max(depth - r H, 0),
+w = max(1 - gap / (r (H_g - H_s)), 0), H_calve = H_s + w (H_g - H_s) (the
+cap, 2026-09-17, keeps H_c from acting in water shallower than H_c / r). The
+linear ramp with that scale is the least-grounded-like blend for which
+F = H - H_calve is non-decreasing in H (thinning never reduces calving):
+grounded ice F = H - H_g; floating ice down to H_c - h0 has F = -h0 (the
+margin's sign decides, no H dependence); thinner floating ice F = H - H_c.
+So a positive margin removes floating ice, a negative one lets tongues
+exist above H_c; H_c = inf is the old law exactly. Verified: psi(H)
+monotone on random fields (0 violations); 2 km, 3-yr steps, H_c 200: 1
+V-cycle on every step with the exact-flag |r_H| ~ 0.5 (the old law's
+level) while 700-2900 tongue cells persist. (A 3x3 maximum-thickness
+windowing of the flag was tried for partially covered front cells and
+dropped: not needed for convergence.) The exact calving Jacobian (`state.dpsi_dH`, `state.dpsi_dbed`
+from `compute_calving_flag`, central differences of F) is in the
+residual / JVP / VJP operators and the bed gradient (exact, no
+neighbourhood coupling to drop); the Vanka patches use the frozen-flag
+Jacobian. H_c sensitivity (2026-09-17, 2 km, H_c 100 vs 400): the model
+keeps ~340 more grounded cells and ~0.05% more volume at H_c = 100, and at
+FIXED cells 2-20 km upstream of tongues flows 7% slower and is 3% thicker —
+a buttressing/front-geometry effect of thin (100-200 m) floating fringes
+that survive on shallow (~-185 m) cold margins, not a numerical artefact
+(grounded cells never see H_c in the law; the cap did not change it). H_c
+is therefore a physical tuning parameter, "the thinnest floating ice that
+survives", with real leverage; ~100-150 m is the observed shelf-front
+range.
 
 ## Greenland-specific conventions
 

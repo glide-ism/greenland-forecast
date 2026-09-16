@@ -105,19 +105,26 @@ CONFIG = GlacierConfig(
     # experiments' setting); the ocean forcing below perturbs both margins
     calving_q=0.0,
     calving_h0=0.0,
+    # floating tongues persist until thinner than H_c (m); the q H + h0
+    # criterion above governs grounded fronts (blended by phi). Starting
+    # value, not a fit: Petermann / 79N / Ryder fronts are ~100-200 m thick.
+    calving_H_c=100.0,
 
     # ---- ocean thermal forcing of the calving margins (ISMIP7 EN4 TF,
-    # model_inputs/thermal_forcing.nc; glacier_inverse/ocean.py). The
-    # climate forcing cannot produce the observed dh/dt at the tidewater
-    # outlets; margin retreat under a warming ocean can. alpha_q scales the
-    # response with thickness (deep fronts like Jakobshavn respond most),
-    # alpha_h shifts every front by the same distance per K (small outlets
-    # respond relatively more). STARTING POINTS for an (alpha_q, alpha_h)
-    # sweep, not fits: a uniform alpha_q of 0.2 over-retreated the big
-    # glaciers and under-retreated the small ones.
+    # model_inputs/thermal_forcing.nc; glacier_inverse/ocean.py). Per step
+    #   h0 = calving_h0 + clim_h * (TF_clim - tf_crit) + alpha_h * dTF
+    # (q likewise). Under the monotone calving law the sign of the margin at
+    # flotation decides whether a tongue is admissible: tf_crit = 3.5 degC
+    # puts Petermann (2.0 in the 1950-79 climatology, 2.4 at warmest) and
+    # 79N (2.2) below it, Jakobshavn (3.8, cold years 3.0) marginal, and
+    # Helheim (6.2) never floating; Kangerlussuaq (4.3) is thermally
+    # indistinguishable from Jakobshavn in this product. clim_h = 15 m/K
+    # gives baselines of about +40 m Helheim, +5 m Jakobshavn, -22 m
+    # Petermann; alpha_h = 50 m/K swings Jakobshavn between -35 and +80 m
+    # over its anomaly range. STARTING POINTS for the (clim_h, alpha_h) sweep.
     ocean_forcing=OceanForcingConfig(
         enabled=True, statistic="mean", ref_years=(1950, 1979), max_dist_km=5.0,
-        alpha_q=0.1, alpha_h=30.0),
+        tf_crit=3.5, clim_q=0.0, clim_h=15.0, alpha_q=0.0, alpha_h=50.0),
 
     # ---- FAS / Vanka settings from the same example, both solvers
     forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,

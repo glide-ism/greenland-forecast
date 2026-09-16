@@ -38,7 +38,7 @@ _HERE = Path(__file__).parent
 CONFIG = GlacierConfig(
     base_dir=str(_HERE),
     vti_base_name="greenland",
-    results_subdir="inverse_vinther_tf",
+    results_subdir="inverse_vinther_bedgrad",
     smb_model="enthalpy",
     anomaly_integration="mean_anomaly",
     stress_scheme="molho",
@@ -52,7 +52,7 @@ CONFIG = GlacierConfig(
     dt=20.0,
     # 3-yr steps over the observational period (equal sub-steps between the
     # epochs 1992, 2008, 2015, 2018, 2019, 2026; the coarse dt before 1990)
-    dt_schedule=((1990.0, 3.0),),
+    #dt_schedule=((1990.0, 3.0),),
     grad_start_time=None,      # revisit once a level-3 FD sweep is done
     # temperature_anomaly.nc is the Vinther SW-Greenland JJA series (1784-2013,
     # CARRA2-extended to 2025), referenced to the CARRA2 climatology window,
@@ -61,11 +61,11 @@ CONFIG = GlacierConfig(
     # (1958-2025) gives 0.58 ice-sheet mean, 0.51 CE .. 0.70 SW, r 0.6-0.8
     # (analysis/arctic_amplification.py --regressor vinther).
     base_anomaly_year=None,
-    alpha_t2m=0.6,
+    alpha_t2m=1.0,#0.6,
 
     n_levels=6,
     max_level=2,
-    max_iters=(50, 100, 200),
+    max_iters=(50, 100, 100),
 
     init_from_observed_geometry=True,
     init_H_floor=1.0,          # = thklim
@@ -102,25 +102,32 @@ CONFIG = GlacierConfig(
     # experiments' setting); the ocean forcing below perturbs both margins
     calving_q=0.0,
     calving_h0=0.0,
+    # floating tongues persist until thinner than H_c (m); the q H + h0
+    # criterion above governs grounded fronts (blended by phi). Starting
+    # value, not a fit: Petermann / 79N / Ryder fronts are ~100-200 m thick.
+    calving_H_c=100,
 
     # ---- ocean thermal forcing of the calving margins (ISMIP7 EN4 TF,
-    # model_inputs/thermal_forcing.nc; glacier_inverse/ocean.py). The
-    # climate forcing cannot produce the observed dh/dt at the tidewater
-    # outlets; margin retreat under a warming ocean can. alpha_q scales the
-    # response with thickness (deep fronts like Jakobshavn respond most),
-    # alpha_h shifts every front by the same distance per K (small outlets
-    # respond relatively more). STARTING POINTS for an (alpha_q, alpha_h)
-    # sweep, not fits: a uniform alpha_q of 0.2 over-retreated the big
-    # glaciers and under-retreated the small ones.
+    # model_inputs/thermal_forcing.nc; glacier_inverse/ocean.py). Per step
+    #   h0 = calving_h0 + clim_h * (TF_clim - tf_crit) + alpha_h * dTF
+    # (q likewise). Under the monotone calving law the sign of the margin at
+    # flotation decides whether a tongue is admissible: tf_crit = 3.5 degC
+    # puts Petermann (2.0 in the 1950-79 climatology, 2.4 at warmest) and
+    # 79N (2.2) below it, Jakobshavn (3.8, cold years 3.0) marginal, and
+    # Helheim (6.2) never floating; Kangerlussuaq (4.3) is thermally
+    # indistinguishable from Jakobshavn in this product. clim_h = 15 m/K
+    # gives baselines of about +40 m Helheim, +5 m Jakobshavn, -22 m
+    # Petermann; alpha_h = 50 m/K swings Jakobshavn between -35 and +80 m
+    # over its anomaly range. STARTING POINTS for the (clim_h, alpha_h) sweep.
     ocean_forcing=OceanForcingConfig(
         enabled=True, statistic="mean", ref_years=(1950, 1979), max_dist_km=5.0,
-        alpha_q=0.0, alpha_h=100.0),
+        tf_crit=3.5, clim_q=0.0, clim_h=15.0, alpha_q=0.0, alpha_h=70.0),
 
     # ---- FAS / Vanka settings from the same example, both solvers
     forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,
                                 absolute_tolerance=10.0, report_norms=False,
-                                omega=0.5, momentum_damping=0.01, step_tolerance=1e-6),
+                                omega=0.5, momentum_damping=1.0, step_tolerance=1e-6),
     adjoint_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,
                                 absolute_tolerance=1e-5, report_norms=False,

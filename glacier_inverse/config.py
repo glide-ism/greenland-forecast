@@ -288,24 +288,36 @@ class SolverConfig:
 
 @dataclass(frozen=True)
 class OceanForcingConfig:
-    """Ocean thermal forcing -> calving margins (see glacier_inverse/ocean.py):
-    q = calving_q + alpha_q * dTF, h0 = calving_h0 + alpha_h * dTF per step,
-    with dTF the step's TF anomaly (annual `statistic` aggregated over the
-    years the step overlaps, minus the per-cell mean over `ref_years` or the
-    scalar `ref_value`), zero farther than `max_dist_km` from the native
-    product and before the record. alpha_q (1/K) shifts the threshold by a
-    fraction of the thickness, alpha_h (m/K) by the same distance everywhere;
-    both are sweep parameters, not differentiated. Needs
-    model_inputs/<filename> (preprocessing/make_thermal_forcing.py); when
-    `enabled` and the file is absent the run warns and keeps constant margins."""
+    """Ocean thermal forcing -> calving margins (see glacier_inverse/ocean.py).
+    Per step, with TF_clim(x) the per-cell mean of the annual `statistic`
+    over `ref_years` and dTF(x, t) = TF_step(x, t) - TF_clim(x):
+
+        q  = calving_q  + clim_q * (TF_clim - tf_crit) + alpha_q * dTF   (1/K)
+        h0 = calving_h0 + clim_h * (TF_clim - tf_crit) + alpha_h * dTF   (m/K)
+
+    Under glide's monotone calving law only the SIGN of the margin at
+    flotation decides whether a floating tongue is admissible, so `tf_crit`
+    is the critical thermal forcing: fjords colder than it in the climatology
+    get negative margins (tongues), warmer ones positive margins (grounded
+    fronts calve within the margin of flotation). `clim_*` set how far above
+    / below flotation that baseline sits per kelvin, the alphas the response
+    to warming. Greenland EN4 front climatologies: Petermann 2.0, 79N 2.2,
+    Jakobshavn 3.8, Kangerlussuaq 4.3, Helheim 6.2 degC. Before the record
+    dTF = 0; both terms are zero farther than `max_dist_km` from the native
+    product. All are sweep parameters, not differentiated. Needs
+    model_inputs/<filename>
+    (preprocessing/make_thermal_forcing.py); when `enabled` and the file is
+    absent the run warns and keeps constant margins."""
     enabled: bool = False
     filename: str = "thermal_forcing.nc"
     statistic: str = "max"          # "max" (annual max of monthly TF) | "mean"
     ref_years: tuple = (1950, 1979)
-    ref_value: Optional[float] = None
     max_dist_km: float = 5.0
-    alpha_q: float = 0.0            # per K
-    alpha_h: float = 0.0            # m per K
+    tf_crit: float = 0.0            # degC; the climatology term is clim * (TF_clim - tf_crit)
+    clim_q: float = 0.0             # per K of climatological TF above tf_crit
+    clim_h: float = 0.0             # m per K of climatological TF above tf_crit
+    alpha_q: float = 0.0            # per K of TF anomaly
+    alpha_h: float = 0.0            # m per K of TF anomaly
     q_bounds: tuple = (-1.0, 1.0)
     h0_bounds: tuple = (-1000.0, 1000.0)
 
@@ -708,7 +720,24 @@ class GlacierConfig:
     # are the baselines that OceanForcingConfig perturbs with the TF anomaly.
     calving_q:        float = -0.5
     calving_h0:       float = 0.0     # m
-    depth_blend:  float = 0.1    # weight on new bed-derived depth vs prior depth
+    # Shelf minimum thickness (m) of glide's gap-blended MONOTONE calving
+    # criterion psi = sigmoid(c r (H - H_calve)), H_calve = H_s + w (H_g -
+    # H_s) with H_g = (depth/r + h0)/(1 - q), H_s = min(H_c, H_g) and w a
+    # linear ramp in the gap between ice base and bed (w = 1 at flotation, 0
+    # once the gap exceeds r (H_g - H_s)): grounded ice calves below H_g,
+    # floating ice down to H_s - h0 calves iff the margin q H + h0 is
+    # positive, thinner floating ice calves below H_s. The cap makes H_c act
+    # only on tongues in water deeper than H_c / r; without it shallow
+    # margins lost every floating cell at once and their grounded ice
+    # ungrounded behind them. Thinning never reduces calving, which is what
+    # makes the implicit solve converge with a sharp flag. inf = the
+    # grounded law everywhere (old behaviour).
+    calving_H_c:      float = float("inf")
+    # Weight on the bed-derived depth (-bed) vs the previous depth field when
+    # the flotation fields are refreshed before a forward run. 1.0 = depth is
+    # exactly -bed (the signed-flotation model's definition); the historical
+    # 0.1 relaxation left phi/xi/psi on a stale bed during the inversion.
+    depth_blend:  float = 1.0
     # Seed the integration from the thickness implied by the observed surface
     # (S_obs - bed, with the hydrostatic value for floating ice) instead of the
     # ice-free state. Matters for tidewater hysteresis. Not differentiated.

@@ -239,6 +239,7 @@ def setup() -> Run:
     mg.calving.timescale.set(config.calving_timescale)
     mg.calving.q.set(Q0)
     mg.calving.h0.set(H00)
+    mg.calving.H_c.set(config.calving_H_c)
 
     ### Multigrid solver parameters (config.forward_solver = the example's)
     fs = config.forward_solver

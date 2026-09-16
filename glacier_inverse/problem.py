@@ -392,6 +392,7 @@ class GlacierProblem:
         mg.calving.timescale.set(cfg.calving_timescale)
         mg.calving.q.set(cfg.calving_q)
         mg.calving.h0.set(cfg.calving_h0)
+        mg.calving.H_c.set(cfg.calving_H_c)
 
         _apply_solver_settings(model.forward_solver, cfg.forward_solver)
         _apply_solver_settings(model.adjoint_solver, cfg.adjoint_solver)
