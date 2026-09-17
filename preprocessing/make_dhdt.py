@@ -23,10 +23,12 @@ observation window as variable-level attrs; the inverse model compares the
 two-snapshot model rate (H(t1) - H(t0)) / (t1 - t0) against it.
 
 Rate definition for the time-series sources (--method, atl15 / itslive_dh):
-    trend     weighted least-squares slope of the series over [t0, t1]
-              (default). Equal to the model's two-snapshot rate only when the
-              elevation changed linearly.
-    endpoint  (h_end - h_start) / (t_end - t_start), with h_start / h_end the
+    trend     weighted least-squares slope of the series over [t0, t1].
+              Equal to the model's two-snapshot rate only when the elevation
+              changed linearly.
+    endpoint  (the default for these sources; gridded / hugonnet rates are
+              used as provided)
+              (h_end - h_start) / (t_end - t_start), with h_start / h_end the
               weighted means of the epochs in a --endpoint-window (yr, default
               2) wide window centred on t0 / t1 (shifted inward, width kept,
               where it overhangs the record) and t_start / t_end those
@@ -59,6 +61,7 @@ GRIDDED_DEFAULT = dict(path='../common_data/dhdt/cci_sec/greenland_sec.nc',
 HUGONNET_DIR = Path('../common_data/dhdt/hugonnet/dhdt')
 HUGONNET_ERR_DIR = Path('../common_data/dhdt/hugonnet/dhdt_err')
 HUGONNET_WINDOW = (2000.0, 2020.0)
+TIME_SERIES_SOURCES = ('atl15', 'itslive_dh')     # the sources --method applies to
 
 
 def _regrid(da, template):
@@ -247,14 +250,17 @@ def _hugonnet(grid, template):
 
 
 def build_dhdt(domain_path: str, source: str = 'atl15', t0=None, t1=None,
-               gridded: dict = None, name: str = None, method: str = 'trend',
+               gridded: dict = None, name: str = None, method: str = None,
                endpoint_window: float = 2.0) -> xr.Dataset:
     """`name` writes gridded_dhdt_<name>.nc instead of gridded_dhdt.nc: a
     second product over another window, consumed by a DhdtSpec(filename=,
     name=) next to the primary one (it is NOT merged into GLIDE_inputs).
     `method` = 'trend' | 'endpoint' for the time-series sources (see the
-    module docstring); with 'endpoint' the attrs' window is the pair of
-    end-window centres, not the requested [t0, t1]."""
+    module docstring); None = 'endpoint' for those sources, and the rate as
+    provided for gridded / hugonnet. With 'endpoint' the attrs' window is
+    the pair of end-window centres, not the requested [t0, t1]."""
+    if method is None:
+        method = 'endpoint' if source in TIME_SERIES_SOURCES else 'trend'
     if method not in ('trend', 'endpoint'):
         raise ValueError(f"method {method!r}")
     if method == 'endpoint' and source not in ('atl15', 'itslive_dh'):
@@ -343,9 +349,10 @@ if __name__ == "__main__":
     parser.add_argument("--gridded-crs", type=str, default=None)
     parser.add_argument("--name", type=str, default=None,
                         help="write gridded_dhdt_<name>.nc (a second product over another window)")
-    parser.add_argument("--method", choices=('trend', 'endpoint'), default='trend',
-                        help="trend: WLS slope over [t0, t1]; endpoint: difference of end-window means, "
-                             "the quantity the model's two-snapshot rate represents")
+    parser.add_argument("--method", choices=('trend', 'endpoint'), default=None,
+                        help="endpoint (default for atl15 / itslive_dh): difference of end-window means, "
+                             "the quantity the model's two-snapshot rate represents; "
+                             "trend: WLS slope over [t0, t1]")
     parser.add_argument("--endpoint-window", type=float, default=2.0,
                         help="width (yr) of the end windows of --method endpoint")
     args = parser.parse_args()

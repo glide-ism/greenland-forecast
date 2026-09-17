@@ -21,7 +21,7 @@ from pathlib import Path
 from make_dem import build_dem
 from make_bedradar import build_flightlines
 from make_velocity import build_velocity, DEFAULT_SOURCE as DEFAULT_VELOCITY
-from make_dhdt import build_dhdt
+from make_dhdt import build_dhdt, TIME_SERIES_SOURCES
 from make_snowline import build_snowline
 from make_insolation import build_insolation
 from make_carra_vars import build_climate as build_climate_carra
@@ -48,7 +48,12 @@ def _optional(step, fn, *args, **kwargs):
 def run_all(domain_path: str, year: int, velocity_source: str = DEFAULT_VELOCITY,
             dhdt_source: str = 'atl15', with_radar: bool = False,
             skip_insolation: bool = False, dhdt_window=(None, None),
-            extra_dhdt=()) -> None:
+            extra_dhdt=(), dhdt_method: str = None,
+            dhdt_endpoint_window: float = 2.0) -> None:
+    """`dhdt_method`: 'endpoint' | 'trend' for the primary dh/dt product
+    (None = make_dhdt's default: endpoint for the time-series sources).
+    `extra_dhdt` entries are (source, t0, t1, name[, method]); an entry
+    without a method takes `dhdt_method`."""
     Path(domain_path, 'model_inputs').mkdir(parents=True, exist_ok=True)
 
     _banner("Geometry (BedMachine)")
@@ -60,11 +65,21 @@ def run_all(domain_path: str, year: int, velocity_source: str = DEFAULT_VELOCITY
     if with_radar:
         _optional("Radar bed picks", build_flightlines, domain_path)
 
-    _optional(f"dH/dt ({dhdt_source})", build_dhdt, domain_path, source=dhdt_source,
-              t0=dhdt_window[0], t1=dhdt_window[1])
-    for src, t0, t1, nm in extra_dhdt:
-        _optional(f"dH/dt extra ({src} {t0}-{t1} -> gridded_dhdt_{nm}.nc)", build_dhdt,
-                  domain_path, source=src, t0=t0, t1=t1, name=nm)
+    def method_for(src, requested):
+        # the method applies to the time-series sources only; a gridded /
+        # hugonnet rate is used as provided (passing 'endpoint' there would
+        # raise, and _optional would silently skip the product)
+        return requested if src in TIME_SERIES_SOURCES else None
+
+    meth = method_for(dhdt_source, dhdt_method)
+    _optional(f"dH/dt ({dhdt_source}, {meth or 'default method'})", build_dhdt, domain_path,
+              source=dhdt_source, t0=dhdt_window[0], t1=dhdt_window[1],
+              method=meth, endpoint_window=dhdt_endpoint_window)
+    for src, t0, t1, nm, *rest in extra_dhdt:
+        meth = method_for(src, rest[0] if rest else dhdt_method)
+        _optional(f"dH/dt extra ({src} {t0}-{t1}, {meth or 'default method'} -> gridded_dhdt_{nm}.nc)",
+                  build_dhdt, domain_path, source=src, t0=t0, t1=t1, name=nm,
+                  method=meth, endpoint_window=dhdt_endpoint_window)
     _optional("Snowline", build_snowline, domain_path)
 
     if not skip_insolation:
@@ -103,13 +118,23 @@ if __name__ == "__main__":
     parser.add_argument("--skip-insolation", action="store_true")
     parser.add_argument("--dhdt-t0", type=float, default=None)
     parser.add_argument("--dhdt-t1", type=float, default=None)
-    parser.add_argument("--extra-dhdt", action="append", default=[], metavar="SOURCE:T0:T1:NAME",
+    parser.add_argument("--dhdt-method", choices=('endpoint', 'trend'), default='endpoint',
+                        help="rate definition for the atl15 / itslive_dh series (make_dhdt.py): "
+                             "endpoint = difference of end-window means, the quantity the model's "
+                             "two-snapshot rate represents (default); trend = WLS slope")
+    parser.add_argument("--dhdt-endpoint-window", type=float, default=2.0,
+                        help="width (yr) of the end windows of the endpoint method")
+    parser.add_argument("--extra-dhdt", action="append", default=[], metavar="SOURCE:T0:T1:NAME[:METHOD]",
                         help="additional dh/dt product over another window, e.g. "
-                             "itslive_dh:2000:2019:measures (repeatable)")
+                             "itslive_dh:1992:2019:measures (repeatable); METHOD (endpoint | trend) "
+                             "overrides --dhdt-method for that product")
     args = parser.parse_args()
     extra = []
     for spec in args.extra_dhdt:
-        src, t0, t1, nm = spec.split(":")
-        extra.append((src, float(t0), float(t1), nm))
+        parts = spec.split(":")
+        if len(parts) not in (4, 5) or (len(parts) == 5 and parts[4] not in ('endpoint', 'trend')):
+            parser.error(f"--extra-dhdt {spec!r}: expected SOURCE:T0:T1:NAME[:endpoint|trend]")
+        extra.append((parts[0], float(parts[1]), float(parts[2]), parts[3], *parts[4:]))
     run_all(args.domain_path, args.year, args.velocity_source, args.dhdt_source,
-            args.with_radar, args.skip_insolation, (args.dhdt_t0, args.dhdt_t1), extra)
+            args.with_radar, args.skip_insolation, (args.dhdt_t0, args.dhdt_t1), extra,
+            dhdt_method=args.dhdt_method, dhdt_endpoint_window=args.dhdt_endpoint_window)
