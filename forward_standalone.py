@@ -193,8 +193,18 @@ class Run:
     """Everything the time loop needs; built by setup(), stepped by run()."""
 
 
-def setup() -> Run:
+def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
+    """Build the model, the SMB model and the writers. `level`, `out_dir`
+    default to the module constants; `ocean_loader` (-> OceanForcing or
+    None) defaults to load_ocean_forcing (the config's EN4 record). The
+    SMB internals are exposed on the returned Run (smb_model, smb_grid,
+    temp_dev, domain_mask, t2m_clim, precip_clim, log_pbias, tbias) so a
+    driver with another climate forcing (forward_projection.py) can swap
+    compute_smb without rebuilding the model."""
     ctx = Run()
+    level = LEVEL if level is None else int(level)
+    out_dir = Path(OUT_DIR if out_dir is None else out_dir)
+    ctx.level, ctx.out_dir = level, out_dir
     ### Load data: gridded inputs (cropped exactly as the inverse), the
     ### calibrated fields and the anomaly record
     with xr.open_dataset(f"{config.base_dir}/model_inputs/{config.gridded_filename}") as f:
@@ -262,7 +272,8 @@ def setup() -> Run:
                               materialize_state=config.enthalpy_materialize_state)
     g = smb_model.grid
     t2m = f32(gd.monthly_t2m.values)                                   # (12, ny, nx) degC
-    precip = f32(gd.monthly_precip.values) * cp.exp(f32(phys.log_pbias.values))
+    log_pbias = f32(phys.log_pbias.values)
+    precip = f32(gd.monthly_precip.values) * cp.exp(log_pbias)
     tbias = f32(phys.tbias.values)
     g.precipitation.precip.set(precip)
     g.radiation.insol_mean.set(f32(gd.monthly_solar_potential_mean.values))
@@ -300,20 +311,23 @@ def setup() -> Run:
         smb[~domain_mask] = -10.0
         return smb
 
+    ctx.smb_model, ctx.smb_grid, ctx.temp_dev, ctx.domain_mask = smb_model, g, temp_dev, domain_mask
+    ctx.t2m_clim, ctx.precip_clim, ctx.log_pbias, ctx.tbias = t2m, precip, log_pbias, tbias
+
     ### Initial state on the run level: thickness from the observed surface
     ### and the calibrated bed (init_from_observed_geometry), restricted like
     ### the inverse; bed / beta restricted the same way
-    model.set_top_level(LEVEL)
-    H = restrict(f32(phys.H_init.values), LEVEL)
-    mg.state.H.set(H, start_level=LEVEL)
-    mg.state.H_prev.set(H, start_level=LEVEL)
-    mg.geometry.bed.set(restrict(bed, LEVEL), start_level=LEVEL)
-    mg.sliding.beta.set(cp.exp(restrict(log_beta, LEVEL)), start_level=LEVEL)
+    model.set_top_level(level)
+    H = restrict(f32(phys.H_init.values), level)
+    mg.state.H.set(H, start_level=level)
+    mg.state.H_prev.set(H, start_level=level)
+    mg.geometry.bed.set(restrict(bed, level), start_level=level)
+    mg.sliding.beta.set(cp.exp(restrict(log_beta, level)), start_level=level)
     for f in (mg.state.u, mg.state.v, mg.state.ud, mg.state.vd, mg.state.mask):
-        f.set(0.0, start_level=LEVEL)
+        f.set(0.0, start_level=level)
 
     ### Writers (glide-example style) on the run level
-    lvl = mg[LEVEL]
+    lvl = mg[level]
     n_glen = float(config.n_glen)
     srf = Field(data=cp.zeros((lvl.ny, lvl.nx), dtype=cp.float32), grid_entity=GridEntity.CELL,
                 dx=lvl.dx, grid=lvl, name="srf", units="m", attrs={"long_name": "Surface Elevation"})
@@ -330,7 +344,7 @@ def setup() -> Run:
     tf_anom = Field(data=cp.zeros((lvl.ny, lvl.nx), dtype=cp.float32), grid_entity=GridEntity.CELL,
                     dx=lvl.dx, grid=lvl, name="tf_anom", units="degC",
                     attrs={"long_name": "Ocean thermal forcing anomaly driving q (0 where inactive)"})
-    ctx.ocean = load_ocean_forcing()
+    ctx.ocean = (load_ocean_forcing if ocean_loader is None else ocean_loader)()
 
     rho_ratio = config.rho_ice / config.rho_water
 
@@ -344,7 +358,7 @@ def setup() -> Run:
                                     (1.0 - rho_ratio) * lvl.state.H.data)
         dhdt.data[:, :] = (lvl.state.H.data - lvl.state.H_prev.data) / dt_step
 
-    vti_dir = OUT_DIR / "vti"
+    vti_dir = out_dir / "vti"
     vti_dir.mkdir(parents=True, exist_ok=True)
     vti_writer = VTIWriter(str(vti_dir), base=config.vti_base_name, dx=lvl.dx,
                            static_fields={"bed": lvl.geometry.bed, "beta": lvl.sliding.beta},
@@ -366,20 +380,21 @@ def dynamics_step(ctx: Run, t_prev: float, dt_step: float) -> None:
     """One glide step on the run level with the state handed over exactly as
     the inverse's GlideStep does: H_prev <- H, H <- H_prev, bed / beta reset
     from the run level down so every coarse level of the hierarchy is fresh."""
-    mg, lvl = ctx.mg, ctx.lvl
+    mg, lvl, level = ctx.mg, ctx.lvl, ctx.level
     H_prev = lvl.state.H.data.copy()
-    mg.state.H_prev.set(H_prev, start_level=LEVEL)
-    mg.state.H.set(H_prev, start_level=LEVEL)
-    mg.geometry.bed.set(lvl.geometry.bed.data.copy(), start_level=LEVEL)
-    mg.sliding.beta.set(lvl.sliding.beta.data.copy(), start_level=LEVEL)
+    mg.state.H_prev.set(H_prev, start_level=level)
+    mg.state.H.set(H_prev, start_level=level)
+    mg.geometry.bed.set(lvl.geometry.bed.data.copy(), start_level=level)
+    mg.sliding.beta.set(lvl.sliding.beta.data.copy(), start_level=level)
     if RESET_VELOCITY:
         for f in (mg.state.u, mg.state.v, mg.state.ud, mg.state.vd):
-            f.set(0.0, start_level=LEVEL)
+            f.set(0.0, start_level=level)
     ctx.model.forward(cp.float32(t_prev), cp.float32(dt_step), update_geometry=False)
 
 
 def run(ctx: Run) -> None:
     model, mg, lvl, gd, crs = ctx.model, ctx.mg, ctx.lvl, ctx.gd, ctx.crs
+    level, out_dir = ctx.level, ctx.out_dir
     ny, nx = gd.sizes["y"], gd.sizes["x"]
     f32 = lambda a: cp.asarray(np.asarray(a), dtype=cp.float32)
     srf, u_s, v_s, dhdt, vti_writer, vti_dir = ctx.srf, ctx.u_s, ctx.v_s, ctx.dhdt, ctx.vti_writer, ctx.vti_dir
@@ -393,16 +408,16 @@ def run(ctx: Run) -> None:
     for t_prev, t_next in steps:
         dt_step = t_next - t_prev
         print(f"Solving forward problem at t={t_prev:.2f} with dt={dt_step:.2f}", flush=True)
-        mg.forcing.smb.set(restrict(ctx.compute_smb(t_prev, t_next), LEVEL), start_level=LEVEL)
-        ocean_forcing(t_prev, dt_step, mg, LEVEL, ctx)
+        mg.forcing.smb.set(restrict(ctx.compute_smb(t_prev, t_next), level), start_level=level)
+        ocean_forcing(t_prev, dt_step, mg, level, ctx)
         dynamics_step(ctx, t_prev, dt_step)
         ctx.update_derived(dt_step)
         vti_writer.append(lvl, time=float(t_next))
         vti_writer.write_pvd()
 
     ### Final state to NetCDF (cell-centred fields on the run level)
-    yc = restrict(f32(np.broadcast_to(gd.y.values[:, None], (ny, nx))), LEVEL)[:, 0]
-    xc = restrict(f32(np.broadcast_to(gd.x.values[None, :], (ny, nx))), LEVEL)[0, :]
+    yc = restrict(f32(np.broadcast_to(gd.y.values[:, None], (ny, nx))), level)[:, 0]
+    xc = restrict(f32(np.broadcast_to(gd.x.values[None, :], (ny, nx))), level)[0, :]
     out = xr.Dataset(coords={"y": cp.asnumpy(yc), "x": cp.asnumpy(xc)})
     for name, arr in [("H", lvl.state.H.data), ("srf", srf.data), ("dhdt", dhdt.data),
                       ("bed", lvl.geometry.bed.data), ("beta", lvl.sliding.beta.data),
@@ -412,12 +427,12 @@ def run(ctx: Run) -> None:
                       ("u_s", 0.5 * (u_s.data[:, 1:] + u_s.data[:, :-1])),
                       ("v_s", 0.5 * (v_s.data[1:, :] + v_s.data[:-1, :]))]:
         out[name] = xr.DataArray(cp.asnumpy(arr), dims=("y", "x"))
-    out.attrs.update(level=LEVEL, t_start=float(T_START), t_end=float(T_END), dt=float(DT),
+    out.attrs.update(level=level, t_start=float(T_START), t_end=float(T_END), dt=float(DT),
                      checkpoint=str(CHECKPOINT), crs_wkt=crs.to_wkt(),
                      ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
                                     else f"constant margins q = {Q0:g}, h0 = {H00:g} m"))
-    out.to_netcdf(OUT_DIR / "forward_soln.nc")
-    print(f"wrote {OUT_DIR / 'forward_soln.nc'}; VTI series in {vti_dir}")
+    out.to_netcdf(out_dir / "forward_soln.nc")
+    print(f"wrote {out_dir / 'forward_soln.nc'}; VTI series in {vti_dir}")
 
 
 def main(export_only: bool = False) -> None:

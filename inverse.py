@@ -24,7 +24,7 @@ config = load_config(DOMAIN)
 
 OUTPUT_PATH = config.output_dir
 WARM_START_PATH = None  # e.g. f"{OUTPUT_PATH}/level_0/torch_vars.p"
-#WARM_START_PATH = f"{DOMAIN}/inverse_geosmooth_nonlin/level_0/torch_vars.p"
+#WARM_START_PATH = f"{DOMAIN}/inverse/level_1/torch_vars.p"
 
 problem = GlacierProblem(config)
 params = problem.params

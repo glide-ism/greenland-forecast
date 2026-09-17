@@ -319,7 +319,7 @@ class OceanForcingConfig:
     alpha_q: float = 0.0            # per K of TF anomaly
     alpha_h: float = 0.0            # m per K of TF anomaly
     q_bounds: tuple = (-1.0, 1.0)
-    h0_bounds: tuple = (-1000.0, 1000.0)
+    h0_bounds: tuple = (-1000.0, 250.0)
 
 
 @dataclass(frozen=True)
@@ -699,6 +699,17 @@ class GlacierConfig:
 
     # Sliding
     beta_init:   float = 5.0
+    # Upper bound on the basal traction coefficient handed to glide (None =
+    # unbounded, the library default). Applied to the FINE-level log beta
+    # before restriction, exactly as forward_standalone.py's BETA_MAX, so the
+    # inverse and the forward drivers run the same field. Above ~20 the bed is
+    # effectively no-slip and the misfit is flat in beta, but where the
+    # flotation fraction xi -> 0 the product beta * xi is degenerate and the
+    # optimizer inflates beta without bound (95 at Humboldt, 2026-09-17),
+    # which makes the drag Jacobian's effective-pressure term stiff. The clamp
+    # passes no gradient above the cap, so only the prior acts there and
+    # pulls the field back under it.
+    beta_max:    Optional[float] = None
     sliding_m:   float = 1.0 / 3.0
     u_reg:       float = 1.0
     water_drag:  float = 0.01

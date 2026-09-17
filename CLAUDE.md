@@ -60,6 +60,34 @@ and forth by diff):
    `make_dhdt.py --source itslive_dh --t0 1992 --t1 2019 --name measures`,
    or `make_all.py --extra-dhdt itslive_dh:1992:2019:measures`). The VTI
    dhdt diagnostic in inverse.py still shows the primary product only.
+   **`make_dhdt.py --method endpoint` (2026-09-17)**: the default `trend`
+   is a 1/rms^2-weighted line slope, but the inverse compares it with the
+   model's two-snapshot rate (H(t1) - H(t0)) / (t1 - t0), and the two agree
+   only for linear change. ITS_LIVE 1992-2019 is flat to 2003 then
+   -340 Gt/yr, and the radar-era epochs are down-weighted (weight centroid
+   2007), so the trend product integrates to -201 Gt/yr over the ice sheet
+   (-230 with periphery) against -146 (-170) for the endpoint rate and
+   Mankoff's -162; SW moves most (-35 -> -17, Mankoff -13), CE stays at -27
+   against Mankoff's +5. `endpoint` = difference of 1/rms^2-weighted means
+   over `--endpoint-window` (2 yr) windows centred on t0/t1, shifted inward
+   where they overhang the record; the attrs' window becomes the window
+   centres rounded to 0.1 yr (1992-2019 -> 1993.0-2019.0; ATL15 2019-2026
+   -> 2020.0-2025.0, where the trend is fine because the loss is near
+   linear). **Endpoint is the DEFAULT since 2026-09-17** for the time-series
+   sources in both `make_dhdt.py` (`--method`, None -> endpoint; gridded /
+   hugonnet rates are used as provided) and `make_all.py` (`--dhdt-method`,
+   `--dhdt-endpoint-window`, and a per-product override as a fifth field,
+   `--extra-dhdt itslive_dh:1992:2019:measures[:trend]`), so the commands
+   above now build endpoint products. `gridded_dhdt_measures.nc` is the
+   endpoint product (the old trend is kept as
+   `gridded_dhdt_measures_trend.nc`); inversions before that date were fit
+   to the trend, and the observation epoch moves from 1992 to 1993. The
+   primary `gridded_dhdt.nc` (ATL15) is STILL the 2019-2026 trend: a rebuild
+   with the new default turns it into 2020.0-2025.0 (pass `--dhdt-method
+   trend` or `--dhdt-endpoint-window 1` to keep more of the span; the trend
+   is fine there). Also found: over 2019-2023 ITS_LIVE thins 0.4 m/yr LESS than ATL15
+   below 1000 m (-167 vs -259 Gt/yr; the 1.92 km product smooths the outlet
+   margins), agreeing to cm/yr above 1500 m.
 7. Ocean thermal forcing of the calving margins (`config.OceanForcingConfig`
    + `config.calving_h0`, `ocean.py`, `forward.simulate(ocean_forcing=)`):
    glide's hybrid height-above-buoyancy threshold `H - H_f < q H + h0` gets
@@ -89,6 +117,10 @@ and forth by diff):
    `GlacierProblem.ocean_forcing` is the loaded forcing (None when disabled
    or the file is absent, with a warning); the same object drives
    `forward_standalone.py`.
+8. `config.beta_max` (Optional, default None = the Alaska behaviour): an
+   upper bound on the basal traction coefficient, clamped on the fine-level
+   log beta before restriction in `problem.simulate`. Greenland sets 20; see
+   the level-0 adjoint divergence paragraph below.
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
@@ -102,6 +134,41 @@ dphi/dbed in the driving stress (delta-like at sigmoid_c = 1/m: 4 and 214
 cells in the band), the active set (identity rows, by construction), the
 detached bed in `_initial_thickness_from_geometry`, and q/h0 (sweep
 parameters). `depth_blend` is now 1.0 (depth == -bed each forward call).
+**dpsi is neglected AGAIN (2026-09-17)**: the exact calving Jacobian added
+with the monotone law (2026-09-16) made the 1 km adjoint solve fail to
+converge, so `flux.cu` drops `- rate H dpsi/dH` from the sink's d_H and
+`grad.cu` drops the dpsi/dbed term of the bed gradient (both commented out
+in glide's working tree); the `dpsi_dH` / `dpsi_dbed` fields are still
+computed, restricted and checkpointed but no longer consumed by those two.
+
+**Level-0 adjoint divergence, fixed 2026-09-17 (glide `dxi_dH` field +
+`config.beta_max`).** With the level-1 warm start the first backward solve
+(2020 -> 2026, dt 6) diverged: the fine-level smoother alone converges, but
+the LEVEL-1 smoother grew ~1.14x per sweep (150 post-sweeps: 3.6e8),
+independent of omega and of x100 momentum damping, with 99% of the residual
+in ~100 cells at the Humboldt front (x -364, y -1066 km): a slow floating
+slab kept alive by a negative calving margin, beside lightly grounded cells
+where beta had run up to 80-100 (192 elsewhere). Cause: the drag Jacobian's
+effective-pressure term `beta p xi^(p-1) (1 - xi)/H` was evaluated on the
+RESTRICTED (averaged) xi of coarse cells mixing floating and grounded
+children (xi 0.02, phi 0.25), where the formula is invalid and maximal
+(~beta/H). glide now carries `state.dxi_dH`, written by
+`compute_flotation_fraction` ((1 - xi)/H where 0 < xi < 1), read by the
+TauBx/TauBy Jacobians, RESTRICTED with xi in `restrict_state` and the adjoint
+V-cycle, and checkpointed by `GlideStep`; forward levels that recompute xi
+recompute it too, so the forward solve is unchanged. Also fixed a typo in
+`TauByStencilDual.get_diffs` (`H_t.d,H_t.d` -> `H_t.d,H_b.d`: the drag JVP
+used the upper cell's thickness perturbation for the lower one). glide tests
+after: grad_bed 1.1%, grad 0.07%, jvp 0.3%. Result: 38/38 adjoint solves, no
+damping restarts, ~65 s per backward pass, with or without the beta cap.
+`config.beta_max` (None = unbounded, the library default; Greenland 20)
+clamps the FINE-level log beta before restriction in `problem.simulate`, the
+same order as `forward_standalone.py`'s `BETA_MAX`, so the inverse, the
+standalone driver and the projections run the same field. beta > 20 is
+effectively no-slip (the loss moves 2121.75 -> 2122.29 with the cap), and
+beta * xi is degenerate as xi -> 0, which is why it ran away; the clamp passes
+no gradient above the cap, so only the prior acts there. Diagnostics in
+`analysis/output/adjoint_diag/`.
 
 Plus ONE non-additive change forced by glide's 2026-09 refactor (signed
 flotation excess + height-above-buoyancy calving; alaska-forecast has to
@@ -187,10 +254,12 @@ V-cycle on every step with the exact-flag |r_H| ~ 0.5 (the old law's
 level) while 700-2900 tongue cells persist. (A 3x3 maximum-thickness
 windowing of the flag was tried for partially covered front cells and
 dropped: not needed for convergence.) The exact calving Jacobian (`state.dpsi_dH`, `state.dpsi_dbed`
-from `compute_calving_flag`, central differences of F) is in the
-residual / JVP / VJP operators and the bed gradient (exact, no
-neighbourhood coupling to drop); the Vanka patches use the frozen-flag
-Jacobian. H_c sensitivity (2026-09-17, 2 km, H_c 100 vs 400): the model
+from `compute_calving_flag`, central differences of F) WAS in the
+residual / JVP / VJP operators and the bed gradient, with the Vanka patches
+on the frozen-flag Jacobian; it was REMOVED 2026-09-17 because the 1 km
+adjoint solve would not converge with it (psi is a ~1 m-wide switch, so
+dpsi/dH is a near-delta), and every operator is on the frozen flag again
+(see the adjoint-coverage paragraph). H_c sensitivity (2026-09-17, 2 km, H_c 100 vs 400): the model
 keeps ~340 more grounded cells and ~0.05% more volume at H_c = 100, and at
 FIXED cells 2-20 km upstream of tongues flows 7% slower and is 3% thicker —
 a buttressing/front-geometry effect of thin (100-200 m) floating fringes
@@ -199,6 +268,59 @@ that survive on shallow (~-185 m) cold margins, not a numerical artefact
 is therefore a physical tuning parameter, "the thinnest floating ice that
 survives", with real leverage; ~100-150 m is the observed shelf-front
 range.
+
+**Thermal-forcing fill (2026-09-17): `make_thermal_forcing.py --method marine`
+(default; `nearest` = the original).** The ISMIP7 TF product's under-ice
+values (Slater mapping) carry one sill-depth level of the profile and swing
+by 1-1.5 K year to year as uniform blocks while the fjord trunk moves
+0.3 K; the old nearest-neighbour fill copied single footprint-edge cells
+(35% of them with zero months) into 5-10 km Voronoi discs with seams and
+across land bridges. The marine fill trusts only OPEN-WATER native cells
+(`bathymetry_mask` outside `rgi_mask`) and extends them HARMONICALLY
+(Laplace, 8-neighbour stencil, one `splu` factorization per footprint)
+through the connected marine domain (open water + ice cells with
+`bed_obs < 0`; 400 k ice cells, the same reach as the mapping). `tf_dist`
+is 0 on every reached cell so `max_dist_km` keeps its meaning;
+`tf_path_km` holds the propagation distance; land and unconnected hollows
+are NaN (baseline margins). Under-ice interannual std becomes the fjord's
+(mean 0.42 K, 90th pct 0.43 vs 0.68 before). Native open-water zeros (lakes /
+frozen bays in the product) remain. `analysis/compare_tf_fill.py` plots
+both. `model_inputs/thermal_forcing.nc` (the inverse's and
+forward_standalone's file) carries the marine fill since 2026-09-17; the old
+product is kept as `thermal_forcing_nearest.nc`. `make_ismip7_forcing.py
+--fill-method` defaults to marine, so the ISMIP7 records need a rebuild to
+pick it up (done 2026-09-17 for ssp126 and ssp370).
+
+**ISMIP7 projections (2026-09-16): `forward_projection.py` +
+`preprocessing/make_ismip7_forcing.py`.** The projection driver imports
+`forward_standalone` (whose `setup(level=, out_dir=, ocean_loader=)` now
+exposes the SMB internals on the returned `Run`) and swaps only the three
+forcing records for the ISMIP7 kit in `ismip7_data/<gcm>/<scenario>/`:
+dEBM2-1000m `tas` (2 m, K) / `pr` (kg m-2 s-1) and ocean-1000m `tf`, one
+monthly file per year on the ISMIP grid (y ASCENDING; the domain is y
+descending, so `flip_y`). The preprocessing splices historical (1850-2014)
++ scenario (2015-2300) into `model_inputs/ismip7/<gcm>_<scenario>/`:
+`catalogue.json` (year -> files; the yearly fields are NOT copied, the
+driver reads them from the kit per step), `climate.nc` (monthly
+climatologies: `tas_clim`/`pr_clim` over the CARRA2 window 1986-2025 for
+the anomaly mode, `tas_pre`/`pr_pre` over 1850-1879 for the constant
+pre-record forcing, ice-mean bias attrs vs CARRA2) and `thermal_forcing.nc`
+(annual mean/max TF for all 451 years in `make_thermal_forcing.py`'s layout,
+streamed year by year and blanked > 30 km from the ice; `OceanForcing.from_file(lazy=True)`
+reads it per year). The run is seamless 1800-2300: 5-yr steps on the
+pre-record climatology, annual steps from 1850 (`DT_SCHEDULE`), last year
+held after 2300. `CLIMATE_MODE="raw"` feeds the dEBM2 fields (nearest-filled
+onto the 2.7% of ice cells outside its footprint, + tbias / exp(log_pbias)
+when `APPLY_BIASES`); `"anomaly"` adds the ISMIP7 departure from its own
+1986-2025 climatology to the calibrated CARRA2 climatology (pr as a ratio).
+The ocean forcing keeps the config's `OceanForcingConfig` on the CESM2 TF
+(TF_clim = CESM2's own 1950-79 mean). Outputs: `scalars.csv` per step
+(volume, VAF in mm SLE, areas, SMB in Gt/yr, forcing ice-means, dTF, wall
+time), `snapshots.nc` every 10 yr, `final_state.nc`, optional VTI. Bias
+found 2026-09-16 (1986-2025, ice cells in the dEBM2 footprint): dEBM2 tas is
+3.5 K colder annual / 1.8 K colder JJA than the CARRA2 100 m forcing and its
+precip 12% lower (0.48 vs 0.55 m/yr); the pre-industrial (1850-79) CESM2
+climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
 
 ## Greenland-specific conventions
 
@@ -318,6 +440,29 @@ range.
 
 ## Known gaps / follow-ups
 
+- **Projection elevation feedback (to do)**: `forward_projection.py` keeps the
+  SMB model's surface (`g.geometry.srf`) and the temperature forcing on the
+  fixed observed DEM; ISMIP7 expects the SMB-height feedback (dSMB/dz or
+  the EBM's own). Small under SSP126, not under SSP585 to 2300.
+- **CARRA2 2 m vs 100 m (analysis/compare_t2m_t100.py, 2026-09-16)**: the
+  T100 - T2m deficit over the ice is 2-4 K in JJA and 7-8 K in winter above
+  2000 m. Year to year the ice-mean 2 m and 100 m anomalies move 1:1 in every
+  season (slope 1.04-1.07, r 0.94), so the 2 m field is neither amplified nor
+  damped interannually. But CARRA2's 2 m record is INHOMOGENEOUS: the JJA
+  deficit above 2000 m steps from 5.1 K (1986-99) to 3.2 (2000-09), 2.7
+  (2010-19), 1.9 (2020-24), 1.4 (2025) while DJF and all elevations below
+  2000 m stay constant to +-0.3 K; summer-only, interior-only steps at 2000
+  and 2020 point to observing-system changes in the surface analysis (to be
+  checked against the CARRA2 documentation), not physics. Hence CARRA2 T2m is
+  3 K colder than RACMO 2 m in the 1990s but 0.2-0.7 K colder after 2020,
+  its 1986-2025 JJA trend is doubled (1.12 K/decade vs RACMO 0.38, CARRA
+  T100 0.56, CESM tas 0.66), and a 40-yr per-cell regression T100 ~ T2m
+  absorbs the step (interior slopes 0.4-0.6 are an artefact). CARRA T100 -
+  RACMO 2 m is stable (JJA ice mean 1.25-1.5 K since 2000), so a 2 m -> 100 m
+  offset for CESM tas should be built from CARRA T100 minus RACMO tas
+  climatologies, not from CARRA's own 2 m; CESM tas then keeps a -0.75 K JJA
+  bias vs RACMO 2 m. The calibration (CARRA T100) is unaffected. Outputs in
+  analysis/output/t2m_t100/ (gitignored).
 - `rto_sample.py` is still on the pre-migration observation API (same as
   alaska); `sensitivity.py` raises on enthalpy/tbias domains (same as alaska).
 - `smoke_test.py` section 8 builds a second `GlacierProblem` (large on the

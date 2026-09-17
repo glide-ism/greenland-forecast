@@ -1,0 +1,417 @@
+"""
+ISMIP7 projection: the MAP forward of forward_standalone.py, driven by the
+ISMIP7 CMIP6-derived forcing instead of the calibration-era forcing.
+
+Same model, same calibrated fields (bed, beta, precip / temperature biases,
+enthalpy parameters from {results}/physical_fields.nc), same time loop and
+ocean-forced calving margins (glacier_inverse/ocean.py) -- only the three
+forcing records are swapped:
+
+    CARRA2 monthly climatology + Vinther anomaly  ->  ISMIP7 <gcm>/<scenario> tas, pr
+    EN4 thermal forcing (1950-2025)               ->  ISMIP7 <gcm>/<scenario> tf
+
+as prepared by preprocessing/make_ismip7_forcing.py in
+model_inputs/ismip7/<gcm>_<scenario>/ (historical 1850-2014 spliced with the
+scenario 2015-2300; the yearly tas / pr files are read from the kit per step
+through catalogue.json, the climatologies and the annual TF statistics from
+climate.nc / thermal_forcing.nc). One seamless run from T_START (1800) to
+T_END (2300):
+
+  * before the record (1800-1850) the forcing is the constant pre-record
+    climatology (tas_pre / pr_pre: 1850-1879 monthly means; dTF = 0), in
+    DT-year steps; from the first record year on, annual steps carry each
+    year's monthly fields (a step spanning several years takes their
+    overlap-weighted mean); after the last year the last year holds;
+  * CLIMATE_MODE "raw": the SMB model sees the ISMIP7 monthly fields as they
+    are (2 m temperature from the dEBM2 downscaling, degC; precipitation as
+    m ice / yr), nearest-filled onto the 12% of ice cells outside the
+    product's footprint, plus the calibrated biases when APPLY_BIASES
+    (tbias additive, exp(log_pbias) multiplicative -- calibrated against
+    CARRA2, so they are a choice here, not a given);
+    CLIMATE_MODE "anomaly": the calibrated CARRA2 climatology + biases, with
+    the ISMIP7 departure from its own climatology over the same window
+    (tas - tas_clim additive, pr / pr_clim multiplicative). This is the
+    bias-corrected option; the raw run shows whether it is needed;
+  * the ocean forcing keeps the config's OceanForcingConfig semantics
+    (statistic, ref_years, tf_crit, clim_*, alpha_*) on the CESM2 record:
+    TF_clim is CESM2's own 1950-79 mean, dTF its departure from it;
+  * alpha_t2m / base_anomaly_year / the Vinther series are not used.
+
+Outputs in {results}/projection_<gcm>_<scenario>/:
+  scalars.csv      one row per step (volume, volume above flotation in mm
+                   SLE, ice / grounded / floating area, integrated SMB, the
+                   forcing's ice-sheet means, dTF, wall time) -- for a first
+                   look and for monitoring a running job
+  snapshots.nc     (time, y, x) fields every SNAPSHOT_EVERY years on the run
+                   level (H, srf, dhdt, velocities, smb, phi, psi, q, h0, tf_anom)
+  final_state.nc   the last step, forward_soln.nc's layout
+  vti/             ParaView series every VTI_EVERY years (0 = off; 290 MB
+                   per 1 km snapshot)
+
+    python forward_projection.py                       # constants below
+    python forward_projection.py --scenario ssp585 --level 1 --t-end 2100
+
+The run level (LEVEL 0 = 1 km, 1 = 2 km, ...) restricts the state as the
+inverse does; the SMB is always evaluated on the 1 km grid and restricted.
+Only domains whose grid IS the ISMIP grid up to a y flip (ismip_greenland
+preset) can read the kit's files directly (make_ismip7_forcing.py records
+the mapping; 'regrid' is refused here).
+"""
+import argparse
+import csv
+import json
+import time
+from pathlib import Path
+from typing import Optional
+
+import cupy as cp
+import netCDF4
+import numpy as np
+import xarray as xr
+from scipy import ndimage
+
+import forward_standalone as fs
+from glacier_inverse.ocean import OceanForcing, year_overlap_weights
+from glacier_inverse.scheduling import build_step_sequence
+
+# ----------------------------------------------------------------- settings
+GCM, SCENARIO = "CESM2-WACCM", "ssp126"
+LEVEL = 0                         # run level (0 = 1 km)
+T_START, T_END = 1800.0, 2300.0
+DT = 5.0                          # step before the record (constant pre-industrial forcing)
+DT_SCHEDULE = ((1850.0, 1.0),)    # annual steps from the record's first year on
+CLIMATE_MODE = "raw"              # "raw" | "anomaly" (see the docstring)
+APPLY_BIASES = True               # raw mode: add tbias, multiply by exp(log_pbias)
+PR_RATIO_MAX = 5.0                # anomaly mode: cap on pr / pr_clim
+SNAPSHOT_EVERY = 10.0             # years between snapshots.nc records (0 = final only)
+VTI_EVERY = 1                   # years between VTI frames (0 = off)
+ICE_H_MIN = 10.0                  # m; "ice" in the scalar diagnostics
+OUT_DIR = None                    # default: {config.output_dir}/projection_{GCM}_{SCENARIO}
+FORCING_DIR = None                # default: {base_dir}/model_inputs/ismip7/{GCM}_{SCENARIO}
+OCEAN = None                      # None -> config.ocean_forcing (or dataclasses.replace(...))
+
+config = fs.config
+RHO_I, RHO_W = float(config.rho_ice), float(config.rho_water)
+KG_PER_MM_SLE = 361.8e12          # 361.8 Gt of ice per mm of sea-level equivalent
+
+
+# ------------------------------------------------------------ climate record
+def _crop_slices(ny0: int, nx0: int, factor: int):
+    ny, nx = (ny0 // factor) * factor, (nx0 // factor) * factor
+    y0, x0 = (ny0 - ny) // 2, (nx0 - nx) // 2
+    return slice(y0, y0 + ny), slice(x0, x0 + nx)
+
+
+class Ismip7Climate:
+    """Monthly tas (degC) / pr (m ice / yr) on the cropped fine grid for any
+    step, from the kit's yearly files (catalogue.json) and the preprocessed
+    climatologies (climate.nc). Cells outside the product's footprint take
+    the nearest native value (index computed once; the footprint is
+    constant across the kit and checked on every read)."""
+
+    def __init__(self, forcing_dir: Path, crop_factor: int):
+        forcing_dir = Path(forcing_dir)
+        with open(forcing_dir / "catalogue.json") as f:
+            cat = json.load(f)
+        if cat["grid_mapping"] not in ("identity", "flip_y"):
+            raise NotImplementedError(f"grid mapping {cat['grid_mapping']!r}: this driver reads the kit's "
+                                      f"files directly and needs the ISMIP grid (up to a y flip)")
+        self.flip = cat["grid_mapping"] == "flip_y"
+        self.files = {int(y): v for y, v in cat["years"].items()}
+        self.years = sorted(y for y, v in self.files.items() if v["tas"] and v["pr"])
+        self.gcm, self.scenario = cat["gcm"], cat["scenario"]
+        self.clim_years, self.pre_years = cat["clim_years"], cat["pre_years"]
+        with xr.open_dataset(forcing_dir / "climate.nc") as c:
+            self.ny0, self.nx0 = c.sizes["y"], c.sizes["x"]
+            self.sl = _crop_slices(self.ny0, self.nx0, crop_factor)
+            cc = c.isel(y=self.sl[0], x=self.sl[1])
+            footprint = np.isfinite(cc["tas_clim"].isel(t=0).values)
+            self.footprint = footprint
+            idx = ndimage.distance_transform_edt(~footprint, return_distances=False, return_indices=True)
+            self.fill_idx = (idx[0], idx[1])
+            self.tas_clim = self._fill(cc["tas_clim"].values.astype(np.float32))
+            self.pr_clim = self._fill(cc["pr_clim"].values.astype(np.float32))
+            self.tas_pre = self._fill(cc["tas_pre"].values.astype(np.float32))
+            self.pr_pre = self._fill(cc["pr_pre"].values.astype(np.float32))
+        self._cache = {}          # year -> (tas, pr); the last few years only
+
+    def _fill(self, a: np.ndarray) -> np.ndarray:
+        """(12, ny, nx): nearest-native fill of the cells outside the footprint."""
+        return a[:, self.fill_idx[0], self.fill_idx[1]]
+
+    def _read(self, path: str, var: str) -> np.ndarray:
+        with xr.open_dataset(path, decode_times=False) as ds:
+            a = ds[var].values.astype(np.float32)
+        if a.shape != (12, self.ny0, self.nx0):
+            raise ValueError(f"{path}: shape {a.shape}, expected (12, {self.ny0}, {self.nx0})")
+        if self.flip:
+            a = a[:, ::-1, :]
+        a = a[:, self.sl[0], self.sl[1]]
+        if not np.array_equal(np.isfinite(a[0]), self.footprint):
+            raise ValueError(f"{path}: footprint differs from climate.nc's")
+        return self._fill(a)
+
+    def year(self, y: int):
+        """(tas degC, pr m ice / yr) monthly fields of calendar year y."""
+        if y not in self._cache:
+            if len(self._cache) > 3:
+                self._cache.pop(min(self._cache))
+            f = self.files[y]
+            tas = self._read(f["tas"], "tas") - 273.15
+            pr = self._read(f["pr"], "pr") * fs.SECONDS_PER_YEAR / config.rho_ice
+            self._cache[y] = (tas, pr)
+        return self._cache[y]
+
+    def monthly(self, t0: float, t1: float):
+        """Overlap-weighted (12, ny, nx) tas / pr for the step (t0, t1]:
+        pre-record climatology before the first year, the last year after
+        the last."""
+        ya, yb = self.years[0], self.years[-1]
+        tas = np.zeros_like(self.tas_pre)
+        pr = np.zeros_like(self.pr_pre)
+        for y, w in year_overlap_weights(t0, t1):
+            if y < ya:
+                ty, py = self.tas_pre, self.pr_pre
+            else:
+                ty, py = self.year(min(y, yb))
+            tas += w * ty
+            pr += w * py
+        return tas, pr
+
+    def describe(self) -> str:
+        return (f"ISMIP7 {self.gcm} {self.scenario}: tas / pr {self.years[0]}-{self.years[-1]}, "
+                f"pre-record forcing = {self.pre_years[0]}-{self.pre_years[1]} climatology, "
+                f"anomaly reference {self.clim_years[0]}-{self.clim_years[1]}, "
+                f"{int((~self.footprint).sum())} cells nearest-filled")
+
+
+# ------------------------------------------------------------------- driver
+def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str):
+    """Replace ctx.compute_smb: the enthalpy SMB model on the fine grid with
+    the ISMIP7 monthly forcing of the step. Records the forcing's ice-sheet
+    means in ctx.forcing_stats for the scalars file."""
+    g, smb_model, temp_dev, domain_mask = ctx.smb_grid, ctx.smb_model, ctx.temp_dev, ctx.domain_mask
+    ice = cp.asarray(ctx.gd.rgi_mask.values, dtype=bool)
+    tbias, pbias = ctx.tbias, cp.exp(ctx.log_pbias)
+    if mode == "anomaly":
+        tas_clim = cp.asarray(climate.tas_clim)
+        pr_clim = cp.asarray(climate.pr_clim)
+        pr_ok = pr_clim > 1e-3
+    elif mode != "raw":
+        raise ValueError(f"CLIMATE_MODE {mode!r}")
+
+    def compute_smb(t_prev: float, t_next: float) -> cp.ndarray:
+        tas_np, pr_np = climate.monthly(t_prev, t_next)
+        tas, pr = cp.asarray(tas_np), cp.asarray(pr_np)
+        if mode == "raw":
+            t2m = tas + tbias if APPLY_BIASES else tas
+            precip = pr * pbias if APPLY_BIASES else pr
+        else:
+            t2m = ctx.t2m_clim + (tas - tas_clim) + tbias
+            ratio = cp.where(pr_ok, cp.clip(pr / cp.maximum(pr_clim, 1e-6), 0.0, PR_RATIO_MAX), 1.0)
+            precip = ctx.precip_clim * ratio
+        g.temperature.t2m.set(t2m)
+        g.precipitation.precip.set(precip)
+        smb_model.forward(temp_deviations=temp_dev)
+        smb = g.state.smb.data.mean(axis=0)
+        smb[~domain_mask] = -10.0
+        ctx.forcing_stats = {
+            "tas_ice_annual": float(tas[:, ice].mean()), "tas_ice_jja": float(tas[5:8][:, ice].mean()),
+            "pr_ice_annual": float(pr[:, ice].mean()),
+            "t2m_model_jja": float(t2m[5:8][:, ice].mean()), "precip_model_annual": float(precip[:, ice].mean()),
+            "smb_ice_mean": float(smb[ice].mean())}
+        return smb
+
+    return compute_smb
+
+
+def make_ocean_loader(forcing_dir: Path, ocean_cfg, q0: float, h00: float):
+    def load() -> Optional[OceanForcing]:
+        path = Path(forcing_dir) / "thermal_forcing.nc"
+        if not ocean_cfg.enabled:
+            print(f"ocean forcing disabled: constant margins q = {q0:g}, h0 = {h00:g} m")
+            return None
+        if not path.exists():
+            print(f"no thermal forcing at {path}: constant margins q = {q0:g}, h0 = {h00:g} m")
+            return None
+        of = OceanForcing.from_file(path, 2 ** config.n_levels, ocean_cfg, q0=q0, h00=h00, lazy=True)
+        print(of.describe())
+        return of
+    return load
+
+
+def scalars(ctx: fs.Run, t: float, dt: float, vol_prev: float, wall: float) -> dict:
+    lvl = ctx.lvl
+    H, bed, phi = lvl.state.H.data, lvl.geometry.bed.data, lvl.state.phi.data
+    A = float(lvl.dx) ** 2
+    ice = H > ICE_H_MIN
+    grounded = ice & (phi > 0.5)
+    floating = ice & ~grounded
+    vol = float((H * ice).sum()) * A
+    haf = cp.maximum(H - (RHO_W / RHO_I) * cp.maximum(-bed, 0.0), 0.0)
+    vaf = float((haf * grounded).sum()) * A
+    smb_int = float((lvl.forcing.smb.data * ice).sum()) * A * RHO_I / 1e12       # Gt / yr
+    row = {"time": t, "dt": dt,
+           "volume_km3": vol / 1e9, "vaf_mm_sle": vaf * RHO_I / KG_PER_MM_SLE,
+           "area_km2": float(ice.sum()) * A / 1e6, "grounded_km2": float(grounded.sum()) * A / 1e6,
+           "floating_km2": float(floating.sum()) * A / 1e6,
+           "smb_Gt_yr": smb_int, "dvdt_Gt_yr": (vol - vol_prev) / dt * RHO_I / 1e12 if vol_prev else float("nan")}
+    row.update(getattr(ctx, "forcing_stats", {}))
+    if ctx.ocean is not None:
+        ok = fs.restrict(cp.asarray(ctx.ocean.ok, dtype=cp.float32), ctx.level) > 0.5
+        dtf = ctx.tf_anom.data
+        row["dtf_mean"] = float(dtf[ok].mean()) if bool(ok.any()) else 0.0
+        row["dtf_max"] = float(dtf[ok].max()) if bool(ok.any()) else 0.0
+    row["wall_s"] = wall
+    return row
+
+
+class SnapshotWriter:
+    """(time, y, x) records on the run level, appended as the run goes."""
+    FIELDS = ("H", "srf", "dhdt", "u_s", "v_s", "smb", "phi", "psi", "xi", "q", "h0", "tf_anom")
+
+    def __init__(self, path: Path, ctx: fs.Run, attrs: dict):
+        lvl, gd = ctx.lvl, ctx.gd
+        ny, nx = gd.sizes["y"], gd.sizes["x"]
+        f32 = lambda a: cp.asarray(np.asarray(a), dtype=cp.float32)
+        yc = cp.asnumpy(fs.restrict(f32(np.broadcast_to(gd.y.values[:, None], (ny, nx))), ctx.level)[:, 0])
+        xc = cp.asnumpy(fs.restrict(f32(np.broadcast_to(gd.x.values[None, :], (ny, nx))), ctx.level)[0, :])
+        self.yc, self.xc = yc, xc
+        self.nc = netCDF4.Dataset(path, "w", format="NETCDF4")
+        self.nc.createDimension("time", None)
+        self.nc.createDimension("y", len(yc))
+        self.nc.createDimension("x", len(xc))
+        self.nc.createVariable("time", "f8", ("time",)).units = "years"
+        self.nc.createVariable("y", "f8", ("y",))[:] = yc
+        self.nc.createVariable("x", "f8", ("x",))[:] = xc
+        ch = (1, len(yc), len(xc))
+        for name in self.FIELDS:
+            self.nc.createVariable(name, "f4", ("time", "y", "x"), zlib=True, complevel=3, chunksizes=ch)
+        for name, arr in (("bed", lvl.geometry.bed.data), ("beta", lvl.sliding.beta.data)):
+            self.nc.createVariable(name, "f4", ("y", "x"), zlib=True, complevel=3)[:, :] = cp.asnumpy(arr)
+        for k, v in attrs.items():
+            setattr(self.nc, k, v)
+        self.ctx, self.n = ctx, 0
+
+    def fields(self):
+        c, lvl = self.ctx, self.ctx.lvl
+        return {"H": lvl.state.H.data, "srf": c.srf.data, "dhdt": c.dhdt.data,
+                "u_s": 0.5 * (c.u_s.data[:, 1:] + c.u_s.data[:, :-1]),
+                "v_s": 0.5 * (c.v_s.data[1:, :] + c.v_s.data[:-1, :]),
+                "smb": lvl.forcing.smb.data, "phi": lvl.state.phi.data, "psi": lvl.state.psi.data,
+                "xi": lvl.state.xi.data, "q": lvl.calving.q.data, "h0": lvl.calving.h0.data,
+                "tf_anom": c.tf_anom.data}
+
+    def append(self, t: float):
+        k = self.n
+        self.nc["time"][k] = t
+        for name, arr in self.fields().items():
+            self.nc[name][k, :, :] = cp.asnumpy(arr)
+        self.nc.sync()
+        self.n += 1
+
+    def close(self):
+        self.nc.close()
+
+
+def _is_multiple(t: float, every: float, eps: float = 1e-6) -> bool:
+    return every > 0 and abs(t / every - round(t / every)) < eps
+
+
+def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: float,
+        dt: float, dt_schedule, mode: str, ocean_cfg) -> None:
+    q0, h00 = fs.Q0, fs.H00
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ctx = fs.setup(level=level, out_dir=out_dir,
+                   ocean_loader=make_ocean_loader(forcing_dir, ocean_cfg, q0, h00))
+    climate = Ismip7Climate(forcing_dir, 2 ** config.n_levels)
+    assert climate.tas_clim.shape[1:] == (ctx.gd.sizes["y"], ctx.gd.sizes["x"])
+    print(climate.describe())
+    print(f"climate mode {mode!r}" + (f", calibrated biases {'applied' if APPLY_BIASES else 'dropped'}"
+                                       if mode == "raw" else ""))
+    ctx.compute_smb = make_compute_smb(ctx, climate, mode)
+    ctx.forcing_stats = {}
+
+    attrs = dict(level=level, t_start=t_start, t_end=t_end, gcm=climate.gcm, scenario=climate.scenario,
+                 climate_mode=mode, apply_biases=int(APPLY_BIASES), checkpoint=str(fs.CHECKPOINT),
+                 crs_wkt=ctx.crs.to_wkt(), climate=climate.describe(),
+                 ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
+                                else f"constant margins q = {q0:g}, h0 = {h00:g} m"))
+    snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, attrs)
+    seq = build_step_sequence(t_start=t_start, t_end=t_end, dt_max=dt, dt_schedule=dt_schedule)
+    ends = [t for t, _ in seq]
+    steps = list(zip([t_start] + ends[:-1], ends))
+    print(f"{len(steps)} steps {t_start:g}-{t_end:g}: first {steps[0][1] - steps[0][0]:g} yr, "
+          f"last {steps[-1][1] - steps[-1][0]:g} yr")
+
+    csv_path = out_dir / "scalars.csv"
+    writer, csv_file = None, None
+    vol_prev = 0.0
+    try:
+        for k, (t_prev, t_next) in enumerate(steps):
+            dt_step = t_next - t_prev
+            tic = time.time()
+            print(f"Solving forward problem at t={t_prev:.2f} with dt={dt_step:.2f}", flush=True)
+            ctx.mg.forcing.smb.set(fs.restrict(ctx.compute_smb(t_prev, t_next), level), start_level=level)
+            fs.ocean_forcing(t_prev, dt_step, ctx.mg, level, ctx)
+            fs.dynamics_step(ctx, t_prev, dt_step)
+            ctx.update_derived(dt_step)
+            row = scalars(ctx, t_next, dt_step, vol_prev, time.time() - tic)
+            vol_prev = row["volume_km3"] * 1e9
+            if writer is None:
+                csv_file = open(csv_path, "w", newline="")
+                writer = csv.DictWriter(csv_file, fieldnames=list(row))
+                writer.writeheader()
+            writer.writerow(row)
+            csv_file.flush()
+            print(f"  t={t_next:.1f}: V {row['volume_km3']:.0f} km3, VAF {row['vaf_mm_sle']:.1f} mm SLE, "
+                  f"area {row['area_km2']:.0f} km2 (floating {row['floating_km2']:.0f}), SMB {row['smb_Gt_yr']:+.0f} Gt/yr, "
+                  f"dV/dt {row['dvdt_Gt_yr']:+.0f} Gt/yr, T_jja {row.get('tas_ice_jja', float('nan')):+.2f} C, "
+                  f"{row['wall_s']:.0f} s", flush=True)
+            last = k == len(steps) - 1
+            if last or _is_multiple(t_next, SNAPSHOT_EVERY):
+                snaps.append(t_next)
+            if VTI_EVERY > 0 and (last or _is_multiple(t_next, VTI_EVERY)):
+                ctx.vti_writer.append(ctx.lvl, time=float(t_next))
+                ctx.vti_writer.write_pvd()
+    finally:
+        snaps.close()
+        if csv_file is not None:
+            csv_file.close()
+
+    # final state in forward_soln.nc's layout
+    final = xr.Dataset(coords={"y": snaps.yc, "x": snaps.xc})
+    for name, arr in list(snaps.fields().items()) + [("bed", ctx.lvl.geometry.bed.data),
+                                                     ("beta", ctx.lvl.sliding.beta.data),
+                                                     ("mask", ctx.lvl.state.mask.data)]:
+        final[name] = xr.DataArray(cp.asnumpy(arr), dims=("y", "x"))
+    final.attrs.update(attrs)
+    final.to_netcdf(out_dir / "final_state.nc")
+    print(f"wrote {out_dir / 'final_state.nc'}, {out_dir / 'snapshots.nc'} ({snaps.n} records), {csv_path}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--gcm", default=GCM)
+    ap.add_argument("--scenario", default=SCENARIO)
+    ap.add_argument("--level", type=int, default=LEVEL)
+    ap.add_argument("--t-start", type=float, default=T_START)
+    ap.add_argument("--t-end", type=float, default=T_END)
+    ap.add_argument("--mode", default=CLIMATE_MODE, choices=("raw", "anomaly"))
+    ap.add_argument("--out-dir", default=OUT_DIR)
+    ap.add_argument("--forcing-dir", default=FORCING_DIR)
+    ap.add_argument("--export", action="store_true", help="only (re)write physical_fields.nc")
+    a = ap.parse_args()
+    if a.export or not fs.PHYSICAL_PATH.exists():
+        fs.export_physical_fields(fs.CHECKPOINT, fs.PHYSICAL_PATH)
+        if a.export:
+            return
+    forcing_dir = Path(a.forcing_dir or f"{config.base_dir}/model_inputs/ismip7/{a.gcm}_{a.scenario}")
+    out_dir = Path(a.out_dir or f"{config.output_dir}/projection_{a.gcm}_{a.scenario}")
+    ocean_cfg = config.ocean_forcing if OCEAN is None else OCEAN
+    run(a.level, out_dir, forcing_dir, float(a.t_start), float(a.t_end), float(DT), DT_SCHEDULE,
+        a.mode, ocean_cfg)
+
+
+if __name__ == "__main__":
+    main()

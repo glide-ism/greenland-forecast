@@ -74,40 +74,73 @@ def _crop_to_factor(ds: xr.Dataset, factor: int) -> xr.Dataset:
     return ds.isel(y=slice(y0, y0 + ny), x=slice(x0, x0 + nx))
 
 
+class _LazyYears:
+    """The (nt, ny, nx) annual statistic read from an open NetCDF on demand
+    (a 451-year projection record is 8.7 GB dense). Supports the two
+    accesses OceanForcing makes: `stat[bool_mask]` and `stat[int_list]`,
+    both returning a (k, ny, nx) float32 array, and `.shape`."""
+
+    def __init__(self, da: xr.DataArray):
+        self.da = da
+        self.shape = tuple(da.shape)
+
+    def __getitem__(self, idx):
+        idx = np.asarray(idx)
+        if idx.ndim == 0:                       # one year -> (ny, nx), like a dense array
+            return self.da.isel(time=int(idx)).values.astype(np.float32)
+        if idx.dtype == bool:
+            idx = np.flatnonzero(idx)
+        return self.da.isel(time=idx).values.astype(np.float32)
+
+
 class OceanForcing:
-    def __init__(self, cfg: OceanForcingConfig, *, years: np.ndarray, stat: np.ndarray,
-                 dist: np.ndarray, q0: float, h00: float, source: str = ""):
+    def __init__(self, cfg: OceanForcingConfig, *, years: np.ndarray, stat, dist: np.ndarray,
+                 q0: float, h00: float, source: str = ""):
         if cfg.statistic not in ("max", "mean"):
             raise ValueError(f"OceanForcingConfig.statistic must be 'max' or 'mean', got {cfg.statistic!r}")
         self.cfg = cfg
         self.years = np.asarray(years, dtype=int)
-        self.stat = np.asarray(stat, dtype=np.float32)           # (nt, ny, nx)
+        # (nt, ny, nx): a dense float32 array or a _LazyYears reader
+        self.stat = stat if isinstance(stat, _LazyYears) else np.asarray(stat, dtype=np.float32)
         self.q0, self.h00 = float(q0), float(h00)
         self.source = source
-        finite = np.isfinite(self.stat).all(axis=0) & np.isfinite(dist)
-        self.ok = finite & (dist <= cfg.max_dist_km)
         y0, y1 = cfg.ref_years
         sel = (self.years >= y0) & (self.years <= y1)
         if not sel.any():
             raise ValueError(f"ocean_forcing.ref_years {cfg.ref_years} outside the "
                              f"record {self.years[0]}-{self.years[-1]}")
-        self.clim = np.where(self.ok, self.stat[sel].mean(axis=0), 0.0).astype(np.float32)
+        clim = self.stat[sel].mean(axis=0)
+        # active where the product is defined (its footprint is constant over the
+        # record; the dense case checks every year, the lazy one the climatology)
+        finite = np.isfinite(clim) & np.isfinite(dist)
+        if isinstance(self.stat, np.ndarray):
+            finite &= np.isfinite(self.stat).all(axis=0)
+        self.ok = finite & (dist <= cfg.max_dist_km)
+        self.clim = np.where(self.ok, clim, 0.0).astype(np.float32)
         self._zero = np.zeros(self.stat.shape[1:], np.float32)
 
     @classmethod
     def from_file(cls, path, crop_factor: int, cfg: OceanForcingConfig, *,
-                  q0: float, h00: float) -> "OceanForcing":
+                  q0: float, h00: float, lazy: bool = False) -> "OceanForcing":
         """Load only the needed annual statistic from thermal_forcing.nc,
-        cropped like GLIDE_inputs (the file is closed before returning)."""
+        cropped like GLIDE_inputs. Dense (the file is closed before
+        returning) or, with `lazy`, read year by year from the file kept
+        open (long projection records)."""
         path = Path(path)
         var = "tf_max" if cfg.statistic == "max" else "tf_mean"
-        with xr.open_dataset(path) as f:
+        f = xr.open_dataset(path)
+        try:
             ds = _crop_to_factor(f, crop_factor)
-            stat = ds[var].values.astype(np.float32)
             years = ds.time.values.astype(int)
             dist = ds.tf_dist.values.astype(np.float32)
             source = str(ds.attrs.get("thermal_forcing_source", path.name))
-        return cls(cfg, years=years, stat=stat, dist=dist, q0=q0, h00=h00, source=source)
+            stat = _LazyYears(ds[var]) if lazy else ds[var].values.astype(np.float32)
+        finally:
+            if not lazy:
+                f.close()
+        of = cls(cfg, years=years, stat=stat, dist=dist, q0=q0, h00=h00, source=source)
+        of._file = f if lazy else None
+        return of
 
     @property
     def ny_nx(self):

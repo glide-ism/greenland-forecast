@@ -38,7 +38,7 @@ _HERE = Path(__file__).parent
 CONFIG = GlacierConfig(
     base_dir=str(_HERE),
     vti_base_name="greenland",
-    results_subdir="inverse_vinther_bedgrad",
+    results_subdir="inverse",
     smb_model="enthalpy",
     anomaly_integration="mean_anomaly",
     stress_scheme="molho",
@@ -47,13 +47,13 @@ CONFIG = GlacierConfig(
     # Observations: surface ~2015 (ArcticDEM overlay) / 2007 (BedMachine
     # surface), velocity 2015-16, extent ~2015, ATL15 dh/dt 2019-2023 (the
     # horizon auto-extends to the latest observation).
-    t_start=1800.0,
+    t_start=1700.0,
     t_end=2015.0,
-    dt=20.0,
+    dt=10.0,
     # 3-yr steps over the observational period (equal sub-steps between the
     # epochs 1992, 2008, 2015, 2018, 2019, 2026; the coarse dt before 1990)
-    #dt_schedule=((1990.0, 3.0),),
-    grad_start_time=None,      # revisit once a level-3 FD sweep is done
+    dt_schedule=((1990.0, 1.0),),
+    grad_start_time=1850,      # revisit once a level-3 FD sweep is done
     # temperature_anomaly.nc is the Vinther SW-Greenland JJA series (1784-2013,
     # CARRA2-extended to 2025), referenced to the CARRA2 climatology window,
     # so no base year is subtracted. alpha_t2m scales the coastal anomaly
@@ -61,11 +61,11 @@ CONFIG = GlacierConfig(
     # (1958-2025) gives 0.58 ice-sheet mean, 0.51 CE .. 0.70 SW, r 0.6-0.8
     # (analysis/arctic_amplification.py --regressor vinther).
     base_anomaly_year=None,
-    alpha_t2m=1.0,#0.6,
+    alpha_t2m=0.6,
 
     n_levels=6,
     max_level=2,
-    max_iters=(50, 100, 100),
+    max_iters=(50, 100, 200),
 
     init_from_observed_geometry=True,
     init_H_floor=1.0,          # = thklim
@@ -79,6 +79,10 @@ CONFIG = GlacierConfig(
     sliding_m=1.0 / 3.0,
     beta_init=2.5,
     mu_log_beta=float(np.log(2.5)),
+    # effectively no-slip above this; also forward_standalone.py's BETA_MAX.
+    # Without it beta runs away where xi -> 0 (95 at Humboldt) and the
+    # adjoint's effective-pressure term goes stiff (2026-09-17)
+    beta_max=20.0,
     # 1e-3, not glide's example 1e-4: with beta_eff = beta*xi vanishing on
     # ice-free/floating cells, water_drag is their only drag, and at 1e-4
     # the ocean cells at fast outlet fronts are nearly dragless (11 km/yr
@@ -121,7 +125,7 @@ CONFIG = GlacierConfig(
     # over its anomaly range. STARTING POINTS for the (clim_h, alpha_h) sweep.
     ocean_forcing=OceanForcingConfig(
         enabled=True, statistic="mean", ref_years=(1950, 1979), max_dist_km=5.0,
-        tf_crit=3.5, clim_q=0.0, clim_h=15.0, alpha_q=0.0, alpha_h=70.0),
+        tf_crit=3.5, clim_q=0.0, clim_h=15.0, alpha_q=0.0, alpha_h=100.0),
 
     # ---- FAS / Vanka settings from the same example, both solvers
     forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
@@ -146,7 +150,7 @@ CONFIG = GlacierConfig(
     h_atm_prior=PriorHyperparams(sigma=0.2, l=150000.0, nu=1),
     cloud_prior=PriorHyperparams(sigma=0.25, l=150000.0, nu=1),
 
-    influence_cap={"z_log_H_atm": 0.3, "z_logit_cloud": 0.3, "z_tbias": 0.3},
+    influence_cap={"z_log_H_atm": 0.3, "z_logit_cloud": 0.3, "z_tbias": 0.3, "z_pbias":0.3},
     influence_transfer="log",
 
     observations=(
@@ -191,9 +195,9 @@ CONFIG = GlacierConfig(
         pcg_rtol=1e-3,
         pcg_rtol_adjoint=1e-2),
 
-    lr_z_bed=0.0125,
-    lr_z_log_beta=0.01 * 9 * 9,
-    lr_z_pbias=0.05,
+    lr_z_bed=0.025,
+    lr_z_log_beta=0.02 * 9 * 9,
+    lr_z_pbias=1.0,
     lr_z_tbias=1.0,
     lr_z_log_H_atm=1.0,
     lr_z_logit_cloud=1.0,

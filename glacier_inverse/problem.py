@@ -1018,7 +1018,13 @@ class GlacierProblem:
         else:
             H_prev_full = self.H_prev
         H_prev_ = differentiable_restriction(H_prev_full, level)
-        log_beta_ = differentiable_restriction(physical.log_beta, level)
+        # config.beta_max caps the FINE-level field before restriction (the
+        # order forward_standalone.py uses, so both run the same beta on every
+        # level); no gradient passes above the cap, where only the prior acts
+        log_beta_full = physical.log_beta
+        if cfg.beta_max is not None:
+            log_beta_full = torch.clamp(log_beta_full, max=math.log(float(cfg.beta_max)))
+        log_beta_ = differentiable_restriction(log_beta_full, level)
         beta_ = torch.exp(log_beta_)
 
         return simulate(
