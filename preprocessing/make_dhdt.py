@@ -22,6 +22,21 @@ The rate is area-averaged onto the domain grid and written with the
 observation window as variable-level attrs; the inverse model compares the
 two-snapshot model rate (H(t1) - H(t0)) / (t1 - t0) against it.
 
+Rate definition for the time-series sources (--method, atl15 / itslive_dh):
+    trend     weighted least-squares slope of the series over [t0, t1]
+              (default). Equal to the model's two-snapshot rate only when the
+              elevation changed linearly.
+    endpoint  (h_end - h_start) / (t_end - t_start), with h_start / h_end the
+              weighted means of the epochs in a --endpoint-window (yr, default
+              2) wide window centred on t0 / t1 (shifted inward, width kept,
+              where it overhangs the record) and t_start / t_end those
+              windows' centres, which become the observation window in the
+              attrs. This IS the quantity the model computes. Over an
+              accelerating period the two differ: for ITS_LIVE 1992-2019
+              (flat to 2003, then -340 Gt/yr; radar-era epochs down-weighted,
+              weight centroid 2007) the WLS slope integrates to -230 Gt/yr
+              against an endpoint rate of about -180 (2026-09-17).
+
 Output: {domain_path}/model_inputs/gridded_dhdt.nc
 """
 import argparse
@@ -84,6 +99,61 @@ def _wls_trend(t, h, s):
     return slope, err, n
 
 
+def _end_window(t, centre, width):
+    """Boolean mask of the epochs in a `width`-yr window centred on `centre`,
+    shifted inward (width kept) where it overhangs the record."""
+    lo, hi = centre - 0.5 * width, centre + 0.5 * width
+    if lo < t.min():
+        lo, hi = t.min(), t.min() + width
+    if hi > t.max():
+        lo, hi = t.max() - width, t.max()
+    keep = (t >= lo - 1e-6) & (t <= hi + 1e-6)
+    if keep.sum() < 2:
+        raise ValueError(f"endpoint window [{lo:.2f}, {hi:.2f}] holds < 2 epochs of {t.min():.2f}..{t.max():.2f}")
+    return keep
+
+
+def _window_mean(t, h, s, width):
+    """Per-pixel weighted mean of h (weights 1/s^2) over the leading time
+    axis, its weighted time centroid, and a 1-sigma error: the larger of
+    the formal error of the mean and the weighted scatter of the window
+    about that mean divided by sqrt(width in years) -- months within a year
+    are treated as fully correlated, and the scatter also carries the
+    seasonal cycle and any within-window trend, so it is conservative."""
+    w = np.where(np.isfinite(h) & np.isfinite(s) & (s > 0), 1.0 / np.maximum(s, 1e-3) ** 2, 0.0)
+    h0 = np.nan_to_num(h)
+    W = w.sum(axis=0)
+    Wn = np.where(W > 0, W, np.nan)
+    hbar = (w * h0).sum(axis=0) / Wn
+    tbar = (w * t[:, None, None]).sum(axis=0) / Wn
+    formal = np.sqrt(1.0 / Wn)
+    scatter = np.sqrt((w * (h0 - hbar) ** 2).sum(axis=0) / Wn / max(float(width), 1.0))
+    bad = (w > 0).sum(axis=0) < 2
+    hbar[bad] = np.nan
+    tbar[bad] = np.nan
+    return hbar, tbar, np.fmax(formal, scatter)
+
+
+def _endpoint_rate(t, read, t0, t1, width):
+    """(rate, err, (t_start, t_end)) from two end windows. `read(mask)`
+    returns (h, s) for the masked epochs, so only the windows are loaded.
+    The returned window holds the unweighted centres of the two end
+    windows (what the attrs carry); the per-pixel rate uses the per-pixel
+    weighted centroids, which differ from them only where coverage within
+    a window is uneven."""
+    t0 = float(t.min()) if t0 is None else float(t0)
+    t1 = float(t.max()) if t1 is None else float(t1)
+    ka, kb = _end_window(t, t0, width), _end_window(t, t1, width)
+    if (ka & kb).any():
+        raise ValueError(f"endpoint windows of {width:g} yr overlap for [{t0:g}, {t1:g}]")
+    ha, ta, ea = _window_mean(t[ka], *read(ka), width)
+    hb, tb, eb = _window_mean(t[kb], *read(kb), width)
+    span = tb - ta
+    rate = (hb - ha) / span
+    err = np.sqrt(ea ** 2 + eb ** 2) / span
+    return rate, err, (float(t[ka].mean()), float(t[kb].mean()))
+
+
 def _window_mask(t, t0, t1, what):
     keep = np.ones_like(t, dtype=bool)
     if t0 is not None:
@@ -95,35 +165,50 @@ def _window_mask(t, t0, t1, what):
     return keep
 
 
-def _atl15_rate(path: Path, t0, t1):
-    """Weighted least-squares trend of delta_h over [t0, t1] -> (rate, err,
-    window)."""
+def _atl15_rate(path: Path, t0, t1, method='trend', width=2.0):
+    """Weighted least-squares trend of delta_h over [t0, t1], or the
+    endpoint rate between its end windows -> (rate, err, window)."""
     ds = xr.open_dataset(path, group='delta_h')
     units = ds['time'].attrs.get('units', 'days since 2018-01-01')
     t = _decimal_years(ds['time'].values, units.split('since')[-1].strip().split(' ')[0])
-    keep = _window_mask(t, t0, t1, "ATL15")
-    h = ds['delta_h'].values[keep].astype('float64')
-    s = ds['delta_h_sigma'].values[keep].astype('float64')
-    t = t[keep]
-    slope, err, n = _wls_trend(t, h, s)
+    if method == 'endpoint':
+        def read(k):
+            return (ds['delta_h'].values[k].astype('float64'),
+                    ds['delta_h_sigma'].values[k].astype('float64'))
+        slope, err, window = _endpoint_rate(t, read, t0, t1, width)
+    else:
+        keep = _window_mask(t, t0, t1, "ATL15")
+        h = ds['delta_h'].values[keep].astype('float64')
+        s = ds['delta_h_sigma'].values[keep].astype('float64')
+        t = t[keep]
+        slope, err, n = _wls_trend(t, h, s)
+        window = (float(t.min()), float(t.max()))
     template = ds['delta_h'].isel(time=0).drop_vars('time')
     template = template.rio.write_crs(ATL15_CRS, inplace=True)
     return (xr.DataArray(slope.astype('float32'), dims=template.dims, coords=template.coords).rio.write_crs(ATL15_CRS),
             xr.DataArray(err.astype('float32'), dims=template.dims, coords=template.coords).rio.write_crs(ATL15_CRS),
-            (float(t.min()), float(t.max())))
+            window)
 
 
-def _itslive_dh_rate(path: Path, t0, t1):
+def _itslive_dh_rate(path: Path, t0, t1, method='trend', width=2.0):
     """Weighted trend of the ITS_LIVE monthly `dh` (error `rms`) over
-    [t0, t1], read in yearly chunks to bound memory."""
+    [t0, t1], or the endpoint rate between its end windows."""
     ds = xr.open_dataset(path)
     t_all = _decimal_years(ds['time'].values, 'days since 1992-01-15')
-    keep = _window_mask(t_all, t0, t1, "ITS_LIVE dh")
-    idx = np.where(keep)[0]
-    h = ds['dh'].isel(time=idx).values.astype('float64')
-    s = ds['rms'].isel(time=idx).values.astype('float64')
-    t = t_all[keep]
-    slope, err, n = _wls_trend(t, h, s)
+    if method == 'endpoint':
+        def read(k):
+            idx = np.where(k)[0]
+            return (ds['dh'].isel(time=idx).values.astype('float64'),
+                    ds['rms'].isel(time=idx).values.astype('float64'))
+        slope, err, window = _endpoint_rate(t_all, read, t0, t1, width)
+    else:
+        keep = _window_mask(t_all, t0, t1, "ITS_LIVE dh")
+        idx = np.where(keep)[0]
+        h = ds['dh'].isel(time=idx).values.astype('float64')
+        s = ds['rms'].isel(time=idx).values.astype('float64')
+        t = t_all[keep]
+        slope, err, n = _wls_trend(t, h, s)
+        window = (float(t.min()), float(t.max()))
     if 'mask' in ds:
         off = ds['mask'].values == 0
         slope[off] = np.nan; err[off] = np.nan
@@ -135,7 +220,7 @@ def _itslive_dh_rate(path: Path, t0, t1):
         if out.y.values[0] < out.y.values[-1]:
             out = out.sortby('y', ascending=False)
         return out
-    return da(slope), da(err), (float(t.min()), float(t.max()))
+    return da(slope), da(err), window
 
 
 def _hugonnet(grid, template):
@@ -162,10 +247,19 @@ def _hugonnet(grid, template):
 
 
 def build_dhdt(domain_path: str, source: str = 'atl15', t0=None, t1=None,
-               gridded: dict = None, name: str = None) -> xr.Dataset:
+               gridded: dict = None, name: str = None, method: str = 'trend',
+               endpoint_window: float = 2.0) -> xr.Dataset:
     """`name` writes gridded_dhdt_<name>.nc instead of gridded_dhdt.nc: a
     second product over another window, consumed by a DhdtSpec(filename=,
-    name=) next to the primary one (it is NOT merged into GLIDE_inputs)."""
+    name=) next to the primary one (it is NOT merged into GLIDE_inputs).
+    `method` = 'trend' | 'endpoint' for the time-series sources (see the
+    module docstring); with 'endpoint' the attrs' window is the pair of
+    end-window centres, not the requested [t0, t1]."""
+    if method not in ('trend', 'endpoint'):
+        raise ValueError(f"method {method!r}")
+    if method == 'endpoint' and source not in ('atl15', 'itslive_dh'):
+        raise ValueError("--method endpoint needs a time-series source (atl15, itslive_dh)")
+    how = f"endpoint difference of {endpoint_window:g}-yr means" if method == 'endpoint' else "trend"
     domain_path = Path(domain_path)
     dem = xr.load_dataset(domain_path / 'model_inputs' / 'gridded_dem.nc')
     output_path = domain_path / 'model_inputs' / (f'gridded_dhdt_{name}.nc' if name else 'gridded_dhdt.nc')
@@ -173,13 +267,13 @@ def build_dhdt(domain_path: str, source: str = 'atl15', t0=None, t1=None,
     template = grid.template()
 
     if source == 'atl15':
-        rate, err, window = _atl15_rate(ATL15_PATH, t0, t1)
+        rate, err, window = _atl15_rate(ATL15_PATH, t0, t1, method, endpoint_window)
         rate_v, err_v = _regrid(rate, template), _regrid(err, template)
-        desc = "ICESat-2 ATL15 delta_h trend {0:.2f}-{1:.2f}"
+        desc = "ICESat-2 ATL15 delta_h " + how + " {0:.2f}-{1:.2f}"
     elif source == 'itslive_dh':
-        rate, err, window = _itslive_dh_rate(ITSLIVE_DH_PATH, t0, t1)
+        rate, err, window = _itslive_dh_rate(ITSLIVE_DH_PATH, t0, t1, method, endpoint_window)
         rate_v, err_v = _regrid(rate, template), _regrid(err, template)
-        desc = "ITS_LIVE Greenland elevation change (G1920V01) dh trend {0:.2f}-{1:.2f}"
+        desc = "ITS_LIVE Greenland elevation change (G1920V01) dh " + how + " {0:.2f}-{1:.2f}"
     elif source == 'gridded':
         g = dict(GRIDDED_DEFAULT, **(gridded or {}))
         path = Path(g['path'])
@@ -208,9 +302,15 @@ def build_dhdt(domain_path: str, source: str = 'atl15', t0=None, t1=None,
     # the step scheduler from inserting slivers between products), else the
     # kept epochs' extent rounded to 1e-2 yr (ATL15's axis starts 6 h into
     # 2019; unrounded it inserted a 6-hour dynamics step).
-    if t0 is not None and t1 is not None and source in ('atl15', 'itslive_dh'):
+    # The endpoint method keeps its own window: the end-window centres are
+    # the times its two means represent.
+    if t0 is not None and t1 is not None and source in ('atl15', 'itslive_dh') and method == 'trend':
         window = (float(t0), float(t1))
-    window = (float(np.round(window[0], 2)), float(np.round(window[1], 2)))
+    # Endpoint centres are rounded to 0.1 yr: mid-month stamps put them at
+    # e.g. 1992.99 / 2018.99, a 0.01-yr sliver next to another product's
+    # 2019.0 (the per-pixel rate keeps its exact centroids).
+    digits = 1 if method == 'endpoint' else 2
+    window = (float(np.round(window[0], digits)), float(np.round(window[1], digits)))
     desc = desc.format(*window)         # the window the attrs carry
     attrs = dict(time_nominal=0.5 * (window[0] + window[1]),
                  time_start=window[0], time_end=window[1])
@@ -223,6 +323,9 @@ def build_dhdt(domain_path: str, source: str = 'atl15', t0=None, t1=None,
                                  units='m yr-1', source=desc, **attrs)
     out['spatial_ref'] = dem['spatial_ref']
     out.attrs['dhdt_source'] = desc
+    out.attrs['dhdt_method'] = method if source in ('atl15', 'itslive_dh') else 'as provided'
+    if method == 'endpoint':
+        out.attrs['endpoint_window_yr'] = float(endpoint_window)
     out.to_netcdf(output_path)
     print(f"wrote {output_path} ({desc}); valid cells {int(np.isfinite(rate_v).sum())}")
     return out
@@ -240,8 +343,14 @@ if __name__ == "__main__":
     parser.add_argument("--gridded-crs", type=str, default=None)
     parser.add_argument("--name", type=str, default=None,
                         help="write gridded_dhdt_<name>.nc (a second product over another window)")
+    parser.add_argument("--method", choices=('trend', 'endpoint'), default='trend',
+                        help="trend: WLS slope over [t0, t1]; endpoint: difference of end-window means, "
+                             "the quantity the model's two-snapshot rate represents")
+    parser.add_argument("--endpoint-window", type=float, default=2.0,
+                        help="width (yr) of the end windows of --method endpoint")
     args = parser.parse_args()
     g = {k: v for k, v in dict(path=args.gridded_path, rate_var=args.rate_var,
                                err_var=args.err_var, crs=args.gridded_crs).items()
          if v is not None}
-    build_dhdt(args.domain_path, args.source, args.t0, args.t1, g, name=args.name)
+    build_dhdt(args.domain_path, args.source, args.t0, args.t1, g, name=args.name,
+               method=args.method, endpoint_window=args.endpoint_window)
