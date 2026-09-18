@@ -35,7 +35,14 @@ T_END (2300):
   * the ocean forcing keeps the config's OceanForcingConfig semantics
     (statistic, ref_years, tf_crit, clim_*, alpha_*) on the CESM2 record:
     TF_clim is CESM2's own 1950-79 mean, dTF its departure from it;
-  * alpha_t2m / base_anomaly_year / the Vinther series are not used.
+  * alpha_t2m / base_anomaly_year / the Vinther series are not used;
+  * surface-elevation feedback (ELEVATION_FEEDBACK, on by default): the
+    forcing temperature follows the evolving model surface,
+    t2m += FEEDBACK_LAPSE(month) * (S_model(t) - S_ref), with S_ref the model
+    surface at FEEDBACK_T_REF (2015, the ISMIP projection start: nothing
+    changes before it) and the lapse the along-surface gradient of the
+    forcing itself (-5.4 to -6.0 K/km). Precipitation does not respond.
+    scalars.csv carries dS_ice_mean and dT_feedback_jja.
 
 Outputs in {results}/projection_<gcm>_<scenario>/:
   scalars.csv      one row per step (volume, volume above flotation in mm
@@ -86,6 +93,20 @@ PR_RATIO_MAX = 5.0                # anomaly mode: cap on pr / pr_clim
 SNAPSHOT_EVERY = 10.0             # years between snapshots.nc records (0 = final only)
 VTI_EVERY = 1                   # years between VTI frames (0 = off)
 ICE_H_MIN = 10.0                  # m; "ice" in the scalar diagnostics
+# --- surface-elevation feedback: t2m += FEEDBACK_LAPSE * (S_model(t) - S_ref)
+ELEVATION_FEEDBACK = True
+FEEDBACK_T_REF = 2015.0           # S_ref = the MODEL surface at this time (no feedback before
+                                  # it, so the calibrated hindcast is untouched; ISMIP's h_ref).
+                                  # None -> the observed DEM the climatology sits on (feedback
+                                  # acts from the first step, model surface errors included)
+# K/m per calendar month (or one scalar): the ALONG-SURFACE gradient of the
+# forcing temperature itself, regressed over the ice on elevation plus a
+# quadratic horizontal trend (CARRA2 100 m climatology on the DEM, 2026-09-17).
+# NOT GLIDE_inputs' monthly_lapse_rate: that is the 100-500 m boundary-layer
+# gradient above a FIXED surface (an inversion, > 0, over 2/3 of the ice in
+# winter; -2 to -4 K/km in summer), not the response to a moving surface.
+FEEDBACK_LAPSE = tuple(v / 1000.0 for v in (-5.60, -5.55, -5.37, -5.39, -5.61, -5.80,
+                                            -5.99, -6.05, -5.89, -5.73, -5.78, -5.81))
 OUT_DIR = None                    # default: {config.output_dir}/projection_{GCM}_{SCENARIO}
 FORCING_DIR = None                # default: {base_dir}/model_inputs/ismip7/{GCM}_{SCENARIO}
 OCEAN = None                      # None -> config.ocean_forcing (or dataclasses.replace(...))
@@ -186,10 +207,63 @@ class Ismip7Climate:
 
 
 # ------------------------------------------------------------------- driver
-def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str):
+class ElevationFeedback:
+    """Surface-elevation feedback on the forcing temperature,
+
+        dT(x, month, t) = lapse(month) * (S_model(x, t) - S_ref(x)),
+
+    evaluated at the start of each step from the run level's state (so it
+    lags the geometry by one step) and prolonged onto the fine SMB grid by
+    injection. S_model = max(H + bed, (1 - rho_i/rho_w) H): where ice is
+    lost the surface falls to the bed (or to sea level), where it advances
+    it rises, so the feedback also acts on newly exposed and newly covered
+    cells. S_ref is the model surface captured at the first step starting
+    at or after `t_ref`, or (t_ref None) the observed DEM, floored at sea
+    level, that the climatology was lapse-corrected onto. Only the air
+    temperature responds: precipitation keeps its calibrated pattern, and
+    glare reads its own surface field for the (unused) avalanche operator
+    only, so that is left alone."""
+
+    def __init__(self, ctx: fs.Run, lapse, t_ref):
+        self.ctx, self.t_ref = ctx, t_ref
+        lapse = np.atleast_1d(np.asarray(lapse, dtype=np.float32))
+        self.lapse = cp.asarray(np.broadcast_to(lapse, (12,)).copy())[:, None, None]      # K/m
+        self.factor = 2 ** ctx.level
+        self.S_ref = None
+        if t_ref is None:
+            dem = cp.maximum(cp.asarray(ctx.gd.elevation.values, dtype=cp.float32), 0.0)
+            self.S_ref = fs.restrict(dem, ctx.level)
+        self.dS_fine = cp.zeros((ctx.gd.sizes["y"], ctx.gd.sizes["x"]), dtype=cp.float32)
+
+    def surface(self) -> cp.ndarray:
+        lvl = self.ctx.lvl
+        H = lvl.state.H.data
+        return cp.maximum(H + lvl.geometry.bed.data, (1.0 - RHO_I / RHO_W) * H)
+
+    def dT(self, t: float) -> cp.ndarray:
+        """(12, ny, nx) temperature increment on the fine grid for a step starting at t."""
+        if self.S_ref is None:
+            if t < self.t_ref - 1e-6:
+                return None
+            self.S_ref = self.surface().copy()
+            print(f"  elevation feedback: reference surface captured at t={t:g}", flush=True)
+        dS = self.surface() - self.S_ref
+        f = self.factor
+        self.dS_fine = cp.repeat(cp.repeat(dS, f, axis=0), f, axis=1) if f > 1 else dS
+        return self.lapse * self.dS_fine[None]
+
+    def describe(self) -> str:
+        l = cp.asnumpy(self.lapse).ravel() * 1000
+        ref = "the observed DEM" if self.t_ref is None else f"the model surface at {self.t_ref:g}"
+        return (f"elevation feedback on t2m: lapse {l.min():.2f}..{l.max():.2f} K/km (monthly), "
+                f"relative to {ref}")
+
+
+def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: Optional[ElevationFeedback] = None):
     """Replace ctx.compute_smb: the enthalpy SMB model on the fine grid with
-    the ISMIP7 monthly forcing of the step. Records the forcing's ice-sheet
-    means in ctx.forcing_stats for the scalars file."""
+    the ISMIP7 monthly forcing of the step (+ the surface-elevation feedback
+    when given). Records the forcing's ice-sheet means in ctx.forcing_stats
+    for the scalars file."""
     g, smb_model, temp_dev, domain_mask = ctx.smb_grid, ctx.smb_model, ctx.temp_dev, ctx.domain_mask
     ice = cp.asarray(ctx.gd.rgi_mask.values, dtype=bool)
     tbias, pbias = ctx.tbias, cp.exp(ctx.log_pbias)
@@ -210,6 +284,9 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str):
             t2m = ctx.t2m_clim + (tas - tas_clim) + tbias
             ratio = cp.where(pr_ok, cp.clip(pr / cp.maximum(pr_clim, 1e-6), 0.0, PR_RATIO_MAX), 1.0)
             precip = ctx.precip_clim * ratio
+        dT_fb = feedback.dT(t_prev) if feedback is not None else None
+        if dT_fb is not None:
+            t2m = t2m + dT_fb
         g.temperature.t2m.set(t2m)
         g.precipitation.precip.set(precip)
         smb_model.forward(temp_deviations=temp_dev)
@@ -219,7 +296,10 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str):
             "tas_ice_annual": float(tas[:, ice].mean()), "tas_ice_jja": float(tas[5:8][:, ice].mean()),
             "pr_ice_annual": float(pr[:, ice].mean()),
             "t2m_model_jja": float(t2m[5:8][:, ice].mean()), "precip_model_annual": float(precip[:, ice].mean()),
-            "smb_ice_mean": float(smb[ice].mean())}
+            "smb_ice_mean": float(smb[ice].mean()),
+            # surface change and the feedback's JJA warming over the ORIGINAL ice mask
+            "dS_ice_mean": float(feedback.dS_fine[ice].mean()) if dT_fb is not None else 0.0,
+            "dT_feedback_jja": float(dT_fb[5:8][:, ice].mean()) if dT_fb is not None else 0.0}
         return smb
 
     return compute_smb
@@ -319,7 +399,7 @@ def _is_multiple(t: float, every: float, eps: float = 1e-6) -> bool:
 
 
 def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: float,
-        dt: float, dt_schedule, mode: str, ocean_cfg) -> None:
+        dt: float, dt_schedule, mode: str, ocean_cfg, elevation_feedback: bool = ELEVATION_FEEDBACK) -> None:
     q0, h00 = fs.Q0, fs.H00
     out_dir.mkdir(parents=True, exist_ok=True)
     ctx = fs.setup(level=level, out_dir=out_dir,
@@ -329,11 +409,17 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
     print(climate.describe())
     print(f"climate mode {mode!r}" + (f", calibrated biases {'applied' if APPLY_BIASES else 'dropped'}"
                                        if mode == "raw" else ""))
-    ctx.compute_smb = make_compute_smb(ctx, climate, mode)
+    feedback = ElevationFeedback(ctx, FEEDBACK_LAPSE, FEEDBACK_T_REF) if elevation_feedback else None
+    print(feedback.describe() if feedback is not None else "elevation feedback OFF: forcing stays on the observed DEM")
+    if feedback is not None and FEEDBACK_T_REF is not None and not (t_start - 1e-6 <= FEEDBACK_T_REF <= t_end):
+        print(f"  WARNING: FEEDBACK_T_REF {FEEDBACK_T_REF:g} lies outside the run {t_start:g}-{t_end:g}: "
+              f"the reference is captured at the first step at or after it, or never")
+    ctx.compute_smb = make_compute_smb(ctx, climate, mode, feedback)
     ctx.forcing_stats = {}
 
     attrs = dict(level=level, t_start=t_start, t_end=t_end, gcm=climate.gcm, scenario=climate.scenario,
                  climate_mode=mode, apply_biases=int(APPLY_BIASES), checkpoint=str(fs.CHECKPOINT),
+                 elevation_feedback=(feedback.describe() if feedback is not None else "off"),
                  crs_wkt=ctx.crs.to_wkt(), climate=climate.describe(),
                  ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
                                 else f"constant margins q = {q0:g}, h0 = {h00:g} m"))
@@ -400,6 +486,8 @@ def main() -> None:
     ap.add_argument("--mode", default=CLIMATE_MODE, choices=("raw", "anomaly"))
     ap.add_argument("--out-dir", default=OUT_DIR)
     ap.add_argument("--forcing-dir", default=FORCING_DIR)
+    ap.add_argument("--no-elevation-feedback", action="store_true",
+                    help="keep the forcing temperature on the observed DEM (the pre-2026-09-17 behaviour)")
     ap.add_argument("--export", action="store_true", help="only (re)write physical_fields.nc")
     a = ap.parse_args()
     if a.export or not fs.PHYSICAL_PATH.exists():
@@ -410,7 +498,8 @@ def main() -> None:
     out_dir = Path(a.out_dir or f"{config.output_dir}/projection_{a.gcm}_{a.scenario}")
     ocean_cfg = config.ocean_forcing if OCEAN is None else OCEAN
     run(a.level, out_dir, forcing_dir, float(a.t_start), float(a.t_end), float(DT), DT_SCHEDULE,
-        a.mode, ocean_cfg)
+        a.mode, ocean_cfg,
+        elevation_feedback=ELEVATION_FEEDBACK and not a.no_elevation_feedback)
 
 
 if __name__ == "__main__":

@@ -101,10 +101,11 @@ def frames_vti(run_dir):
     run_dir = Path(run_dir)
     pvd = next((run_dir / 'vti').glob('*.pvd'))
     items = re.findall(r'timestep="([\d.]+)"[^>]*file="([^"]+)"', pvd.read_text())
-    soln = xr.open_dataset(run_dir / 'forward_soln.nc')
-    t0 = float(soln.attrs.get('t_start', np.nan))
+    meta = next((run_dir / fn for fn in ('forward_soln.nc', 'snapshots.nc', 'final_state.nc') if (run_dir / fn).exists()), None)
+    attrs = xr.open_dataset(meta).attrs if meta else {}
+    t0 = float(attrs.get('t_start', np.nan))
     phys = run_dir.parent / 'physical_fields.nc'
-    if np.isfinite(t0) and phys.exists() and int(soln.attrs.get('level', 0)) == 0:
+    if np.isfinite(t0) and phys.exists() and int(attrs.get('level', 0)) == 0 and float(items[0][0]) > t0:
         H0 = crop_to_factor(xr.open_dataset(phys), 2 ** N_LEVELS).H_init.values
         yield t0, H0, None
     for t, fn in items:
@@ -118,9 +119,34 @@ def frames_snapshots(run_dir):
         yield float(ds.time[k]), ds.H[k].values, ds.smb[k].values
 
 
+def frames_series_nc(run_dir):
+    """Yield (time, H, smb) from tools/vti_to_nc.py's series.nc (preferred:
+    yearly, compressed), the initial state first when physical_fields.nc is
+    next to the run and the series does not start at t_start."""
+    import netCDF4
+    run_dir = Path(run_dir)
+    nc = netCDF4.Dataset(run_dir / 'series.nc')
+    t = np.asarray(nc['model_year'][:], dtype=float)
+    t0 = float(nc.getncattr('run_t_start')) if 'run_t_start' in nc.ncattrs() else np.nan
+    phys = run_dir.parent / 'physical_fields.nc'
+    if np.isfinite(t0) and t[0] > t0 and phys.exists() and int(float(nc.getncattr('run_level'))) == 0:
+        H0 = crop_to_factor(xr.open_dataset(phys), 2 ** N_LEVELS).H_init.values
+        yield t0, H0, None
+    for k in range(len(t)):
+        yield float(t[k]), np.asarray(nc['H'][k, :, :]), np.asarray(nc['smb'][k, :, :])
+    nc.close()
+
+
 def model_series(run_dir, masks, dx):
     run_dir = Path(run_dir)
-    gen = frames_snapshots(run_dir) if (run_dir / 'snapshots.nc').exists() else frames_vti(run_dir)
+    if (run_dir / 'series.nc').exists():
+        gen = frames_series_nc(run_dir)
+    elif (run_dir / 'snapshots.nc').exists() and not (run_dir / 'vti').exists():
+        gen = frames_snapshots(run_dir)
+    elif list((run_dir / 'vti').glob('*.pvd')) if (run_dir / 'vti').exists() else False:
+        gen = frames_vti(run_dir)          # yearly frames beat the decadal snapshots
+    else:
+        gen = frames_snapshots(run_dir)
     rows = []
     for t, H, smb in gen:
         row = {'time': t}

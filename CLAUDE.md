@@ -434,16 +434,92 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   `America/Nuuk`; for the whole ice sheet the hour-angle error at the E/W
   margins is a few degrees (gtic takes one lon). Acceptable for now; a
   per-column longitude in gtic is the fix.
+- **`ismip_exporter.py` (rewritten 2026-09-17)** exports a forward run's
+  YEARLY VTI series (`VTI_EVERY = 1`; every frame read once, streamed through
+  one NetCDF per variable) to the ISMIP7 file set: 19 gridded + 10 scalar
+  variables, ST stamped at the end of the model year, FL mid-year with
+  bounds; one seamless run serves `--experiment historical` (1850-2014, C001)
+  and the scenario (2015-, C003/5/7). Physics it follows: `licalvf =
+  -rho_i (1 - psi) H / calving_timescale` from the end-of-step frame (the
+  implicit sink exactly; the old u_c = 2000 m/yr face flux is gone);
+  `lifmassbf = 0` because the ocean forcing acts through the calving margins
+  (the calving / frontal-melt split ISMIP7 asks for does not exist in this
+  model); `ligroundf` = upwinded H u through grounded | floating-or-ocean
+  faces; `strbasemag` with the BASAL velocity, the per-year xi and the capped
+  beta; rho_water 1028; ice = active-set mask < 0.5 so the 1 m thklim floor is
+  not exported as ice; v needs NO sign flip (glide's stencils are image
+  oriented: v > 0 points to the previous row = north on this grid). The
+  cropped north-to-south model grid is padded and flipped onto the ISMIP
+  grid; `--resolution` coarsens conservatively onto the nested node-centred
+  grids (checked: mass from the 4 km lithk / lim = 1.00000; yearly lim change
+  vs SMB + calving closes to a few %). ~4 s per model year at 4 km. The flux
+  sign (positive = mass gain, `LOSS_SIGN`), the variable list and the file
+  naming / `CORE` experiment ids are from the ISMIP6 appendix and the 2026-08
+  cheat sheet as recalled: VERIFY against the ISMIP7 data request.
+- **`tools/vti_to_nc.py` (2026-09-17)** converts a run's VTI series to one
+  compressed CF NetCDF, `<run-dir>/series.nc` ((time, y, x) per field, vectors
+  split into u/v components, bed/beta static, `model_year` + a CF `time`,
+  EPSG:3413 grid mapping): velocities and SMB zeroed off the ice (the 2/3 of
+  the grid that is ice-free holds solver noise and made those fields
+  incompressible), values rounded to physical precision (1 cm, 0.01 m/yr,
+  1 mm/yr, 1e-4 for the flags), zlib + shuffle. 326 MB -> ~50 MB per 1 km
+  frame (x6.4 with every field kept; ~x9 with `--drop U_s srf`, both
+  derivable), ~1.6 s per frame; a read-back check runs before `--delete-vti`
+  removes the frames. `ismip_exporter.py` (`FrameSource`) and
+  `analysis/basin_mass_balance.py` read `series.nc` when present, else the
+  VTI; the exporter's output from the two agrees to rounding. Disk history:
+  yearly 1 km VTI is 140 GB per 1800-2300 projection; the previous
+  inversion's outputs (~520 GB) were deleted 2026-09-17.
+- **`tools/vti_compress.py` (2026-09-17)** is the working-format answer:
+  it rewrites a run's VTI frames IN PLACE (masked off-ice velocities / SMB,
+  the same rounding as vti_to_nc.py, VTK's compressed appended layout with
+  `vtkLZ4DataCompressor`, `header_type="UInt32"`, 32 KiB blocks), so the .pvd
+  and the model-year time slider are untouched and ParaView >= 5.5 reads them
+  directly, decoding only the ticked arrays at GB/s. 326 -> ~70 MB per 1 km
+  frame (x4.6; the LZ4 level is irrelevant, default 1; zlib would be ~50 MB
+  but 5x slower to inflate, which is what made series.nc feel slow), ~1 s
+  per frame per core, each frame decoded back and compared bit for bit
+  before it replaces the original, already-compressed frames skipped.
+  `ismip_exporter.read_vti` reads both layouts (LZ4 and zlib). series.nc
+  (vti_to_nc.py) remains the archive / CF format. NOT yet verified in
+  ParaView itself (no ParaView on this machine) -- open a compressed .pvd
+  before converting a run you care about.
+- **glide `VTIWriter` compression (2026-09-17)**: `write_vti` / `VTIWriter`
+  take `compressor` (None | "lz4" | "zlib"), `compression_level` (0 = LZ4
+  fast), `precision` (field -> quantum, rounded on the GPU before the
+  transfer), `mask_field` + `masked_fields` (zero the named fields where the
+  dynamic field is >= 0.5). `forward_standalone.setup()` turns it on for both
+  forward drivers (`VTI_COMPRESSOR`, `VTI_PRECISION`, `VTI_MASKED_FIELDS`):
+  1 km frames are ~80 MB and an append takes 0.2 s (the raw 326 MB write
+  took longer), decoded frames match the run's final state within the
+  quanta. The inverse's writers (glacier_inverse/io.py) still write raw
+  frames (library policy: alaska-verbatim).
 - `export_ismip.py` uses ISMIP6 names/units (`lithk, orog, topg, xvelmean …`,
   m s⁻¹, kg m⁻² s⁻¹, days since 1850-01-01). Reconcile with the ISMIP7
   variable request (github.com/ismip) before submitting.
 
 ## Known gaps / follow-ups
 
-- **Projection elevation feedback (to do)**: `forward_projection.py` keeps the
-  SMB model's surface (`g.geometry.srf`) and the temperature forcing on the
-  fixed observed DEM; ISMIP7 expects the SMB-height feedback (dSMB/dz or
-  the EBM's own). Small under SSP126, not under SSP585 to 2300.
+- **Projection elevation feedback (done 2026-09-17, temperature only)**:
+  `forward_projection.py` adds `FEEDBACK_LAPSE(month) * (S_model(t) - S_ref)`
+  to the forcing temperature (`ElevationFeedback`; `ELEVATION_FEEDBACK`,
+  `--no-elevation-feedback`). `S_ref` is the MODEL surface at
+  `FEEDBACK_T_REF` = 2015 (ISMIP's h_ref; runs are bit-identical before it,
+  so the hindcast is untouched), or the observed DEM when None. The lapse is
+  the along-surface gradient of the forcing itself, -5.4 to -6.0 K/km by
+  month (regression of the CARRA2 100 m climatology on elevation + a
+  quadratic horizontal trend over the ice; -4.1 K/km below 1200 m in JJA) —
+  NOT `monthly_lapse_rate`, the 100-500 m boundary-layer gradient above a
+  fixed surface (an inversion over 2/3 of the ice in winter, -2 to -4 K/km in
+  summer). The surface is read at the start of each step (one-step lag) on
+  the run level and injected onto the fine SMB grid; lost ice drops the
+  surface to the bed, so newly exposed cells warm too. glare reads
+  `geometry.srf` for the avalanche operator only, so it is left alone.
+  Precipitation does NOT respond (open). Test, SSP370 anomaly mode, 4 km,
+  2015-2100: mean surface lowering 21 m, JJA feedback warming 0.12 K over
+  the original ice mask, SMB -445 vs -376 Gt/yr in 2096-2100, sea-level
+  contribution 100.7 vs 95.0 mm (+6%; +2.6% at 2050). `scalars.csv` carries
+  `dS_ice_mean` and `dT_feedback_jja`.
 - **CARRA2 2 m vs 100 m (analysis/compare_t2m_t100.py, 2026-09-16)**: the
   T100 - T2m deficit over the ice is 2-4 K in JJA and 7-8 K in winter above
   2000 m. Year to year the ice-mean 2 m and 100 m anomalies move 1:1 in every

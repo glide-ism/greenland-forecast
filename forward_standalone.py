@@ -68,6 +68,17 @@ RESET_VELOCITY = False            # zero u, v, ud, vd before each momentum solve
                                   # made the FAS solve diverge on the second 1 km step
 BETA_MAX = 20.0                   # cap on the basal traction coefficient (the example
                                   # clips its inverted beta at 20)
+# --- VTI frames: ParaView-native LZ4-compressed appended data (glide VTIWriter,
+# 2026-09-17), with the fields rounded to physical precision and the velocities
+# / SMB / dh/dt zeroed on ice-free cells (active-set mask = 1), where they hold
+# solver noise. 326 -> ~75 MB per 1 km frame and the write is faster than the
+# raw one. None = the raw layout. tools/vti_compress.py applies the same to
+# existing runs; ismip_exporter.read_vti reads both.
+VTI_COMPRESSOR = "lz4"
+VTI_PRECISION = {"H": 0.01, "srf": 0.01, "dhdt": 1e-3, "smb": 1e-3, "U": 0.01, "U_s": 0.01, "U_b": 0.01,
+                 "q": 1e-4, "h0": 0.01, "tf_anom": 1e-3, "xi": 1e-4, "phi": 1e-4, "psi": 1e-4,
+                 "bed": 0.01, "beta": 1e-3}
+VTI_MASKED_FIELDS = ("U", "U_s", "U_b", "smb", "dhdt")
 # --- ocean forcing: None -> config.ocean_forcing, or an override such as
 # dataclasses.replace(config.ocean_forcing, alpha_q=0.0, alpha_h=50.0)
 OCEAN = None
@@ -361,6 +372,8 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
     vti_dir = out_dir / "vti"
     vti_dir.mkdir(parents=True, exist_ok=True)
     vti_writer = VTIWriter(str(vti_dir), base=config.vti_base_name, dx=lvl.dx,
+                           compressor=VTI_COMPRESSOR, precision=VTI_PRECISION,
+                           mask_field="mask", masked_fields=VTI_MASKED_FIELDS,
                            static_fields={"bed": lvl.geometry.bed, "beta": lvl.sliding.beta},
                            dynamic_fields={"H": lvl.state.H, "srf": srf, "dhdt": dhdt,
                                            "U": [lvl.state.u, lvl.state.v], "U_s": [u_s, v_s],
