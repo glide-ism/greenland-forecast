@@ -15,7 +15,8 @@ model_inputs/ismip7/<gcm>_<scenario>/ (historical 1850-2014 spliced with the
 scenario 2015-2300; the yearly tas / pr files are read from the kit per step
 through catalogue.json, the climatologies and the annual TF statistics from
 climate.nc / thermal_forcing.nc). One seamless run from T_START (1800) to
-T_END (2300):
+T_END (2301: the ISMIP7 record ends with nominal year 2300, i.e. the step
+(2300, 2301]; the kit's last year is held for it):
 
   * before the record (1800-1850) the forcing is the constant pre-record
     climatology (tas_pre / pr_pre: 1850-1879 monthly means; dTF = 0), in
@@ -68,6 +69,7 @@ import argparse
 import csv
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -84,7 +86,7 @@ from glacier_inverse.scheduling import build_step_sequence
 # ----------------------------------------------------------------- settings
 GCM, SCENARIO = "CESM2-WACCM", "ssp126"
 LEVEL = 0                         # run level (0 = 1 km)
-T_START, T_END = 1800.0, 2300.0
+T_START, T_END = 1800.0, 2301.0   # ISMIP's nominal year 2300 is the step (2300, 2301]; ssp370: 2101
 DT = 5.0                          # step before the record (constant pre-industrial forcing)
 DT_SCHEDULE = ((1850.0, 1.0),)    # annual steps from the record's first year on
 CLIMATE_MODE = "raw"              # "raw" | "anomaly" (see the docstring)
@@ -350,8 +352,15 @@ class SnapshotWriter:
     """(time, y, x) records on the run level, appended as the run goes."""
     FIELDS = ("H", "srf", "dhdt", "u_s", "v_s", "smb", "phi", "psi", "xi", "q", "h0", "tf_anom")
 
-    def __init__(self, path: Path, ctx: fs.Run, attrs: dict):
+    def __init__(self, path: Path, ctx: fs.Run, attrs: dict, append: bool = False):
         lvl, gd = ctx.lvl, ctx.gd
+        if append:
+            self.nc = netCDF4.Dataset(path, "a")
+            self.yc, self.xc = np.asarray(self.nc["y"][:]), np.asarray(self.nc["x"][:])
+            for k, v in attrs.items():
+                setattr(self.nc, k, v)
+            self.ctx, self.n = ctx, self.nc.dimensions["time"].size
+            return
         ny, nx = gd.sizes["y"], gd.sizes["x"]
         f32 = lambda a: cp.asarray(np.asarray(a), dtype=cp.float32)
         yc = cp.asnumpy(fs.restrict(f32(np.broadcast_to(gd.y.values[:, None], (ny, nx))), ctx.level)[:, 0])
@@ -398,8 +407,54 @@ def _is_multiple(t: float, every: float, eps: float = 1e-6) -> bool:
     return every > 0 and abs(t / every - round(t / every)) < eps
 
 
+def resume_state(out_dir: Path, ctx: fs.Run, level: int, feedback: Optional["ElevationFeedback"]):
+    """--continue: put the run's last state back on the model (H from
+    final_state.nc, full precision; velocities start from zero and the first
+    momentum solve costs a few extra V-cycles), seed the VTI writer with the
+    existing frames so numbering and the .pvd carry on, and rebuild the
+    elevation feedback's reference surface from the VTI frame at
+    FEEDBACK_T_REF. Returns (t_resume, vol_prev) from scalars.csv."""
+    import re
+    fin_path, csv_path = out_dir / "final_state.nc", out_dir / "scalars.csv"
+    if not fin_path.exists() or not csv_path.exists():
+        raise SystemExit(f"--continue needs {fin_path} and {csv_path} (a run that finished)")
+    fin = xr.open_dataset(fin_path)
+    if int(fin.attrs.get("level", level)) != level:
+        raise SystemExit(f"--continue: the run is on level {fin.attrs.get('level')}, not {level}")
+    rows = list(csv.DictReader(open(csv_path)))
+    t_resume, vol_prev = float(rows[-1]["time"]), float(rows[-1]["volume_km3"]) * 1e9
+    H = cp.asarray(fin.H.values, dtype=cp.float32)
+    if H.shape != ctx.lvl.state.H.data.shape:
+        raise SystemExit(f"--continue: final_state.nc grid {H.shape} != run level grid {ctx.lvl.state.H.data.shape}")
+    ctx.mg.state.H.set(H, start_level=level)
+    ctx.mg.state.H_prev.set(H, start_level=level)
+    # VTI: continue the numbering and the manifest
+    w = ctx.vti_writer
+    pvd = Path(w.out_dir) / f"{w.base}.pvd"
+    if pvd.exists():
+        items = re.findall(r'timestep="([\d.]+)"[^>]*file="([^"]+)"', pvd.read_text())
+        w.records = [(float(t), fn) for t, fn in items]
+        w._step_idx = max((int(m.group(1)) for fn in w.records for m in [re.search(r"_(\d+)\.vti$", fn[1])] if m), default=-1) + 1
+        if w.records and abs(w.records[-1][0] - t_resume) > 1e-6:
+            print(f"  WARNING: last VTI frame at t={w.records[-1][0]:g}, scalars end at t={t_resume:g}")
+    # elevation feedback reference: the model surface at FEEDBACK_T_REF, from that frame
+    if feedback is not None and feedback.S_ref is None and t_resume >= feedback.t_ref - 1e-6:
+        from ismip_exporter import read_vti
+        hit = [fn for t, fn in w.records if abs(t - feedback.t_ref) < 1e-6]
+        if not hit:
+            raise SystemExit(f"--continue: no VTI frame at FEEDBACK_T_REF = {feedback.t_ref:g} to rebuild the feedback "
+                             f"reference surface from (use --no-elevation-feedback to continue without it)")
+        srf = read_vti(Path(w.out_dir) / hit[0], ["srf"])["srf"]
+        feedback.S_ref = cp.asarray(srf, dtype=cp.float32)
+        print(f"  elevation feedback: reference surface rebuilt from the frame at t={feedback.t_ref:g}")
+    print(f"--continue: state at t={t_resume:g} from {fin_path.name}; {len(w.records)} VTI frames, "
+          f"{len(rows)} scalar rows, next frame index {w._step_idx}")
+    return t_resume, vol_prev
+
+
 def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: float,
-        dt: float, dt_schedule, mode: str, ocean_cfg, elevation_feedback: bool = ELEVATION_FEEDBACK) -> None:
+        dt: float, dt_schedule, mode: str, ocean_cfg, elevation_feedback: bool = ELEVATION_FEEDBACK,
+        continue_run: bool = False) -> None:
     q0, h00 = fs.Q0, fs.H00
     out_dir.mkdir(parents=True, exist_ok=True)
     ctx = fs.setup(level=level, out_dir=out_dir,
@@ -416,6 +471,12 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
               f"the reference is captured at the first step at or after it, or never")
     ctx.compute_smb = make_compute_smb(ctx, climate, mode, feedback)
     ctx.forcing_stats = {}
+    vol_prev = 0.0
+    if continue_run:
+        t_resume, vol_prev = resume_state(out_dir, ctx, level, feedback)
+        if t_end <= t_resume + 1e-6:
+            raise SystemExit(f"--continue: the run already reaches t={t_resume:g}; --t-end {t_end:g} adds nothing")
+        t_start = t_resume
 
     attrs = dict(level=level, t_start=t_start, t_end=t_end, gcm=climate.gcm, scenario=climate.scenario,
                  climate_mode=mode, apply_biases=int(APPLY_BIASES), checkpoint=str(fs.CHECKPOINT),
@@ -423,7 +484,11 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
                  crs_wkt=ctx.crs.to_wkt(), climate=climate.describe(),
                  ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
                                 else f"constant margins q = {q0:g}, h0 = {h00:g} m"))
-    snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, attrs)
+    if continue_run:
+        attrs["continued_from"] = f"t={t_start:g} ({datetime.now().isoformat(timespec='seconds')}); velocity warm start reset"
+        snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, {"continued_from": attrs["continued_from"], "t_end": t_end}, append=True)
+    else:
+        snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, attrs)
     seq = build_step_sequence(t_start=t_start, t_end=t_end, dt_max=dt, dt_schedule=dt_schedule)
     ends = [t for t, _ in seq]
     steps = list(zip([t_start] + ends[:-1], ends))
@@ -432,7 +497,10 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
 
     csv_path = out_dir / "scalars.csv"
     writer, csv_file = None, None
-    vol_prev = 0.0
+    if continue_run:
+        header = next(csv.reader(open(csv_path)))
+        csv_file = open(csv_path, "a", newline="")
+        writer = csv.DictWriter(csv_file, fieldnames=header, extrasaction="ignore")
     try:
         for k, (t_prev, t_next) in enumerate(steps):
             dt_step = t_next - t_prev
@@ -471,8 +539,13 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
                                                      ("beta", ctx.lvl.sliding.beta.data),
                                                      ("mask", ctx.lvl.state.mask.data)]:
         final[name] = xr.DataArray(cp.asnumpy(arr), dims=("y", "x"))
+    if continue_run:
+        old = {k: v for k, v in xr.open_dataset(out_dir / "final_state.nc").attrs.items()}
+        old.update(t_end=t_end, continued_from=attrs["continued_from"])
+        attrs = old
     final.attrs.update(attrs)
-    final.to_netcdf(out_dir / "final_state.nc")
+    final.to_netcdf(out_dir / "final_state.nc.tmp")
+    (out_dir / "final_state.nc.tmp").replace(out_dir / "final_state.nc")
     print(f"wrote {out_dir / 'final_state.nc'}, {out_dir / 'snapshots.nc'} ({snaps.n} records), {csv_path}")
 
 
@@ -488,6 +561,9 @@ def main() -> None:
     ap.add_argument("--forcing-dir", default=FORCING_DIR)
     ap.add_argument("--no-elevation-feedback", action="store_true",
                     help="keep the forcing temperature on the observed DEM (the pre-2026-09-17 behaviour)")
+    ap.add_argument("--continue", dest="continue_run", action="store_true",
+                    help="resume the run in --out-dir from its final state and run on to --t-end "
+                         "(appends to scalars.csv, snapshots.nc and the VTI series)")
     ap.add_argument("--export", action="store_true", help="only (re)write physical_fields.nc")
     a = ap.parse_args()
     if a.export or not fs.PHYSICAL_PATH.exists():
@@ -499,7 +575,7 @@ def main() -> None:
     ocean_cfg = config.ocean_forcing if OCEAN is None else OCEAN
     run(a.level, out_dir, forcing_dir, float(a.t_start), float(a.t_end), float(DT), DT_SCHEDULE,
         a.mode, ocean_cfg,
-        elevation_feedback=ELEVATION_FEEDBACK and not a.no_elevation_feedback)
+        elevation_feedback=ELEVATION_FEEDBACK and not a.no_elevation_feedback, continue_run=a.continue_run)
 
 
 if __name__ == "__main__":

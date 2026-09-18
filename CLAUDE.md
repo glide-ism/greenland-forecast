@@ -316,7 +316,15 @@ when `APPLY_BIASES`); `"anomaly"` adds the ISMIP7 departure from its own
 The ocean forcing keeps the config's `OceanForcingConfig` on the CESM2 TF
 (TF_clim = CESM2's own 1950-79 mean). Outputs: `scalars.csv` per step
 (volume, VAF in mm SLE, areas, SMB in Gt/yr, forcing ice-means, dTF, wall
-time), `snapshots.nc` every 10 yr, `final_state.nc`, optional VTI. Bias
+time), `snapshots.nc` every 10 yr, `final_state.nc`, optional VTI.
+`--continue` (2026-09-18) resumes a finished run from `final_state.nc`
+(full-precision H; velocities restart from zero, one solve's worth of extra
+V-cycles) to the given `--t-end`, appending to scalars.csv / snapshots.nc /
+the VTI series (numbering and .pvd carried on) and rebuilding the elevation
+feedback's reference surface from the VTI frame at FEEDBACK_T_REF (refuses
+without one unless `--no-elevation-feedback`); `continued_from` is recorded
+in the attrs. Used 2026-09-18 to extend all six projections (CESM2-WACCM and
+MRI-ESM2-0 x ssp126/370/585) from 2300 to 2301 for the ISMIP7 window. Bias
 found 2026-09-16 (1986-2025, ice cells in the dEBM2 footprint): dEBM2 tas is
 3.5 K colder annual / 1.8 K colder JJA than the CARRA2 100 m forcing and its
 precip 12% lower (0.48 vs 0.55 m/yr); the pre-industrial (1850-79) CESM2
@@ -434,28 +442,51 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   `America/Nuuk`; for the whole ice sheet the hour-angle error at the E/W
   margins is a few degrees (gtic takes one lon). Acceptable for now; a
   per-column longitude in gtic is the fix.
-- **`ismip_exporter.py` (rewritten 2026-09-17)** exports a forward run's
-  YEARLY VTI series (`VTI_EVERY = 1`; every frame read once, streamed through
-  one NetCDF per variable) to the ISMIP7 file set: 19 gridded + 10 scalar
-  variables, ST stamped at the end of the model year, FL mid-year with
-  bounds; one seamless run serves `--experiment historical` (1850-2014, C001)
-  and the scenario (2015-, C003/5/7). Physics it follows: `licalvf =
-  -rho_i (1 - psi) H / calving_timescale` from the end-of-step frame (the
-  implicit sink exactly; the old u_c = 2000 m/yr face flux is gone);
-  `lifmassbf = 0` because the ocean forcing acts through the calving margins
-  (the calving / frontal-melt split ISMIP7 asks for does not exist in this
-  model); `ligroundf` = upwinded H u through grounded | floating-or-ocean
-  faces; `strbasemag` with the BASAL velocity, the per-year xi and the capped
-  beta; rho_water 1028; ice = active-set mask < 0.5 so the 1 m thklim floor is
-  not exported as ice; v needs NO sign flip (glide's stencils are image
-  oriented: v > 0 points to the previous row = north on this grid). The
-  cropped north-to-south model grid is padded and flipped onto the ISMIP
-  grid; `--resolution` coarsens conservatively onto the nested node-centred
-  grids (checked: mass from the 4 km lithk / lim = 1.00000; yearly lim change
-  vs SMB + calving closes to a few %). ~4 s per model year at 4 km. The flux
-  sign (positive = mass gain, `LOSS_SIGN`), the variable list and the file
-  naming / `CORE` experiment ids are from the ISMIP6 appendix and the 2026-08
-  cheat sheet as recalled: VERIFY against the ISMIP7 data request.
+- **`ismip_exporter.py` (rewritten 2026-09-17, checked against the official
+  ISMIP7 compliance checker 2026-09-18, `../ISM_SimulationChecker`)** exports
+  a forward run's YEARLY frames (compressed VTI preferred; series.nc when no
+  .pvd) to the submission layout `<root>/Models/GrIS/<group>/<model>/CORE/
+  <set>/` (`--group`, default UM -- VERIFY the group id; `--set-counter`,
+  default C001: a PARAMETER SET shared by all core experiments, not an
+  experiment id -- the cheat sheet's C00x numbering was misread earlier) with
+  a `not_modelled.txt` declaring the optional variables we lack. Windows from
+  the checker's experiments_ismip7.csv: historical 1850-2014 (start free),
+  projections pinned to 2015-2300 (ssp370 2100), so **runs must reach
+  t = 2301 (2101)**: nominal year Y is the step (Y, Y+1] and the frame at Y+1
+  (forward_projection T_END is 2301 since 2026-09-18; the ssp585 run on disk
+  stops at 2300 and fails only that test). What the checker enforces and the
+  exporter now does: ST stamped Jan 1 of Y+1, FL Jul 1 with bounds, time in
+  days since 1850-01-01 (standard calendar) as FLOAT32; float32 variables,
+  netCDF4 default _FillValue; global attrs group/model/contact_name/
+  contact_email/crs=EPSG:3413; fill POLICIES per variable (the checker
+  compares footprints cell by cell): `forbidden` (lithk, dlithkdt, licalvf,
+  ligroundf, lifmassbf, the fractions) = zero, never fill; `no_ice`
+  (velocities, strbasemag) = fill exactly where sftgif = 0; `no_grounded_ice`
+  / `no_floating_ice` (libmassbfgr / fl) = fill where sftgrf / sftflf = 0;
+  `outside_domain` (orog, base, topg, acabf) = ONE shared footprint, the
+  computational domain, here ice + ice-free land (bed >= 0; open ocean is
+  outside, which also keeps orog >= 0). Consistency: orog = base + lithk,
+  base >= topg, base = topg where sftgrf = 1, base > topg where sftflf = 1 --
+  so off ice base = orog = bed, all four are coarsened with the same weight,
+  and the grounded fraction is RECOMPUTED from the exported geometry
+  (sigmoid(c (r H + bed))) because the model's phi lags the final H update in
+  ~250 cells per frame. Signs from the request's ranges: licalvf, lifmassbf
+  <= 0; ligroundf > 0 (flux of grounded ice); scalar totals are magnitudes
+  (scalars are not range-checked). Physics: licalvf = -rho_i (1 - psi) H /
+  calving_timescale from the end-of-step frame (the implicit sink exactly);
+  lifmassbf = 0 (the ocean forcing acts through the calving margin: the
+  calving / frontal-melt split does not exist in this model); ligroundf =
+  upwinded H u through grounded | floating-or-ocean faces; strbasemag with the
+  BASAL velocity, the per-year xi and the capped beta; rho_water 1028; ice =
+  active-set mask < 0.5 (the 1 m thklim floor is not ice); v needs NO sign
+  flip (glide's stencils are image oriented). `--resolution` coarsens
+  conservatively onto the nested node-centred grids (mass from the 4 km
+  lithk / lim = 1.00000). Result 2026-09-18 at 4 km: 0 errors and 0 warnings
+  on historical; ssp585 only the missing year 2300 plus a warning on 19 cells
+  of acabf below -6e-4 kg m-2 s-1 (-20 m w.e./yr melt). ~4 s per year at
+  4 km. Run the checker with `cd ../ISM_SimulationChecker && PYTHONPATH=.
+  python -m isschecker --source-path <set dir> --variable-list ismip7`
+  (needs cf-units, installed in glide_test_env 2026-09-18).
 - **`tools/vti_to_nc.py` (2026-09-17)** converts a run's VTI series to one
   compressed CF NetCDF, `<run-dir>/series.nc` ((time, y, x) per field, vectors
   split into u/v components, bed/beta static, `model_year` + a CF `time`,

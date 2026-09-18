@@ -9,12 +9,19 @@ the ISMIP Greenland grid, streaming one model year at a time through every
 output file (each 290 MB frame is read once, not once per variable).
 
     python ismip_exporter.py --run-dir domains/greenland/inverse/projection_CESM2-WACCM_ssp585 \\
-        --experiment ssp585                       # 2015-2300 -> C007
-    python ismip_exporter.py --run-dir ... --experiment historical      # 1850-2014 -> C001
+        --experiment ssp585                       # nominal 2015-2300 (the run must reach t = 2301)
+    python ismip_exporter.py --run-dir ... --experiment historical      # 1850-2014
     python ismip_exporter.py --run-dir ... --experiment ssp585 --years 2015 2020 --resolution 4000
 
-One seamless 1800-2300 run serves both the historical and the scenario export
-(`--years` selects the window; the defaults follow the experiment).
+Files land in <submission-dir>/Models/GrIS/<group>/<model>/CORE/<set-counter>/,
+the layout the ISMIP7 compliance checker (ISM_SimulationChecker) takes as
+--source-path, with a not_modelled.txt declaring the optional variables the
+model lacks. One seamless 1800-2301 run serves both the historical and the
+scenario export (`--years` selects the window; the defaults follow the
+experiment). Verified against the checker 2026-09-18 (4 km, historical
+1850-2014 and ssp585): no errors, no warnings except 19 cells of acabf below
+-6e-4 kg m-2 s-1 and the missing nominal year 2300 of a run that stopped at
+t = 2300.
 
 Time convention (ISMIP): model year Y is the step (Y, Y+1]; its frame carries
 time Y+1. State variables (ST) are that frame, stamped YYYY+1-01-01; flux
@@ -58,9 +65,11 @@ script (written against glide's example zarr and the pre-2026-09 model):
     node-centred ISMIP grids (a coarse cell is centred on every f-th node:
     weights 1/2, 1, ..., 1, 1/2 across f + 1 fine cells).
 
-Sign convention: fluxes are positive when they ADD mass to the ice sheet
-(ISMIP6 appendix, as recalled -- VERIFY against the ISMIP7 data request), so
-calving and grounding-line fluxes are negative. One constant, LOSS_SIGN.
+Sign convention (the checker's ISMIP7_variable_request.csv ranges): licalvf
+and lifmassbf are non-positive (loss), ligroundf is the flux of grounded ice
+across the grounding line, positive; the scalar totals are magnitudes
+(ranges [0, 1e25]; the checker does not range-check scalars). LOSS_SIGN
+applies to the gridded loss fluxes only.
 """
 import argparse
 import re
@@ -82,14 +91,23 @@ LOSS_SIGN = -1.0                        # see the docstring: verify for ISMIP7
 SLIDING_P = 1.0                         # glide's effective-pressure exponent (grid.py default)
 TIME_UNITS, TIME_CALENDAR = "days since 1850-01-01", "standard"
 
-MODEL, PROJECT, REGION = "GLIDE", "ISMIP7", "GrIS"
+GROUP, MODEL, REGION = "UM", "GLIDE", "GrIS"        # file-name fields 3 and 4; group id: VERIFY with ISMIP7
 ISM_MEMBER, FORCING_ID = "m001", "f001"
-# core experiments of the ISMIP7 protocol cheat sheet (2026-08): (experiment, ESM) -> id, window
-CORE = {("historical", "CESM2-WACCM"): ("C001", (1850, 2014)), ("historical", "MRI-ESM2-0"): ("C002", (1850, 2014)),
-        ("ssp370", "CESM2-WACCM"): ("C003", (2015, 2100)), ("ssp370", "MRI-ESM2-0"): ("C004", (2015, 2100)),
-        ("ssp126", "CESM2-WACCM"): ("C005", (2015, 2300)), ("ssp126", "MRI-ESM2-0"): ("C006", (2015, 2300)),
-        ("ssp585", "CESM2-WACCM"): ("C007", (2015, 2300)), ("ssp585", "MRI-ESM2-0"): ("C008", (2015, 2300)),
-        ("ctrl", "CESM2-WACCM"): ("C009", (2015, 2300)), ("ctrl", "MRI-ESM2-0"): ("C010", (2015, 2300))}
+# nominal year windows of experiments_ismip7.csv (the checker's): historical
+# starts anywhere in 1850-2014 (the run's first yearly frame here), the
+# projections are pinned to 2015-end. The SET COUNTER (C001, E003, P012 ...)
+# in the file name identifies a parameter set, not an experiment: all core
+# experiments of one configuration share it and sit in one directory
+# Models/GrIS/<group>/<model>/CORE/<set>/ (the checker's --source-path).
+EXPERIMENTS = {"historical": (1850, 2014), "ssp370": (2015, 2100), "ssp126": (2015, 2300),
+               "ssp585": (2015, 2300), "ctrl": (2015, 2300)}
+# non-mandatory variables this model does not represent (-> not_modelled.txt)
+NOT_MODELLED = {"hfgeoubed": "no thermal model: the enthalpy model is the surface only",
+                "zvelsurf": "vertical velocities are not diagnosed", "zvelbase": "vertical velocities are not diagnosed",
+                "litemptop": "isothermal ice", "litempavg": "isothermal ice", "litempbotgr": "isothermal ice",
+                "litempbotfl": "isothermal ice", "litemp": "isothermal ice",
+                "thdrflf": "the ocean forcing acts on the calving margin, not on a sub-shelf melt",
+                "deltag": "no GIA / sea-level model", "refgeoid": "no GIA / sea-level model"}
 
 # name -> (ST | FL, long_name, standard_name, units)
 GRID_VARS = {
@@ -99,6 +117,8 @@ GRID_VARS = {
     "base": ("ST", "Ice base elevation", "base_altitude", "m"),
     "xvelmean": ("ST", "Mean velocity in x", "land_ice_vertical_mean_x_velocity", "m s-1"),
     "yvelmean": ("ST", "Mean velocity in y", "land_ice_vertical_mean_y_velocity", "m s-1"),
+    "xvelsurf": ("ST", "Surface velocity in x", "land_ice_surface_x_velocity", "m s-1"),
+    "yvelsurf": ("ST", "Surface velocity in y", "land_ice_surface_y_velocity", "m s-1"),
     "xvelbase": ("ST", "Basal velocity in x", "land_ice_basal_x_velocity", "m s-1"),
     "yvelbase": ("ST", "Basal velocity in y", "land_ice_basal_y_velocity", "m s-1"),
     "strbasemag": ("ST", "Basal drag", "land_ice_basal_drag", "Pa"),
@@ -193,7 +213,10 @@ class FrameSource:
     def __init__(self, run_dir):
         run_dir = Path(run_dir)
         self.nc = None
-        if (run_dir / "series.nc").exists():
+        has_vti = (run_dir / "vti").exists() and any((run_dir / "vti").glob("*.pvd"))
+        # the VTI frames (LZ4-compressed since 2026-09-17) are the complete
+        # record; series.nc may have been written with fields dropped
+        if (run_dir / "series.nc").exists() and not has_vti:
             import netCDF4
             self.nc = netCDF4.Dataset(run_dir / "series.nc")
             self.times = [float(v) for v in self.nc["model_year"][:]]
@@ -274,7 +297,7 @@ class IsmipGrid:
         num = self._smooth(self._embed(np.nan_to_num(a).astype(np.float32), 0.0) * w)
         den = self._smooth(w)
         with np.errstate(invalid="ignore", divide="ignore"):
-            out = np.where(den > 1e-6, num / den, np.nan)
+            out = np.where(den > 0.0, num / den, np.nan)      # defined wherever the fraction is
         fill = FILL_VALUE if np.isnan(outside) else np.float32(outside)
         return np.where(np.isfinite(out), out, fill).astype(np.float32)
 
@@ -290,6 +313,7 @@ class Physics:
         self.rho_i, self.rho_w, self.g = float(cfg.rho_ice), float(cfg.rho_water), float(cfg.gravity)
         self.m, self.u_reg, self.water_drag = float(cfg.sliding_m), float(cfg.u_reg), float(cfg.water_drag)
         self.tau_c = float(cfg.calving_timescale)
+        self.sigmoid_c = float(cfg.sigmoid_c)
         self.bed, self.beta, self.dx = bed.astype("float64"), beta.astype("float64"), float(dx)
         self.marine = bed < 0.0
 
@@ -300,27 +324,51 @@ class Physics:
         H = fr["H"].astype("float64")
         ice = fr["mask"] < 0.5                                   # active set: mask = 1 pins the thklim floor
         icef = ice.astype(np.float32)
-        phi, psi, xi = fr["phi"].astype("float64"), fr["psi"].astype("float64"), fr["xi"].astype("float64")
+        psi, xi = fr["psi"].astype("float64"), fr["xi"].astype("float64")
         Hi = np.where(ice, H, 0.0)
-        base = np.maximum(self.bed, -r * H)
+        # The grounded fraction is RECOMPUTED from the exported geometry,
+        # phi = sigmoid(c (r H + bed)), not taken from the frame: the model's
+        # flag lags the final thickness update in a few hundred cells per
+        # frame (phi = 1 with the ice just afloat), and the checker requires
+        # base = topg wherever sftgrf = 1 and base > topg wherever sftflf = 1.
+        z = r * H + self.bed
+        phi = 1.0 / (1.0 + np.exp(-np.clip(self.sigmoid_c * z, -60.0, 60.0)))
+        # Footprints, by the data request's fill policies (the checker compares
+        # them cell by cell): `no_ice` fields are defined exactly where sftgif > 0;
+        # `outside_domain` fields (orog, base, topg, acabf) share ONE footprint,
+        # the computational domain = ice plus ice-free land (bed >= 0; open
+        # ocean is outside, which also keeps orog >= 0), and within it the
+        # geometry must satisfy orog = base + lithk, base >= topg, base = topg
+        # on wholly grounded cells and base > topg on wholly floating ones --
+        # so off the ice base = bed and orog = bed, and every one of these
+        # fields is averaged with the same weight when the output is coarsened.
+        domain = ice | (self.bed >= 0.0)
+        domf = domain.astype(np.float32)
+        grf, flf = (phi * ice).astype(np.float32), ((1.0 - phi) * ice).astype(np.float32)
+        base = np.where(ice, np.maximum(self.bed, -r * H), self.bed)
         um, vm = fr["U"][..., 0].astype("float64"), fr["U"][..., 1].astype("float64")
+        us, vs = fr["U_s"][..., 0].astype("float64"), fr["U_s"][..., 1].astype("float64")
         ub, vb = fr["U_b"][..., 0].astype("float64"), fr["U_b"][..., 1].astype("float64")
         ub2 = ub ** 2 + vb ** 2
         tau_b = ri * self.g * (self.beta * np.where(xi > 0, xi ** SLIDING_P, 0.0) * (ub2 + self.u_reg) ** ((self.m - 1.0) / 2.0)
                                + self.water_drag) * np.sqrt(ub2)
+        # licalvf / lifmassbf are non-positive in the request (loss); ligroundf
+        # is the flux OF grounded ice across the grounding line, positive
         calv = LOSS_SIGN * ri * (1.0 - psi) * Hi / self.tau_c / spy                  # kg m-2 s-1
-        gl = LOSS_SIGN * ri * self.grounding_line_flux(Hi, um, vm, ice & (phi >= 0.5), ice) / spy
+        gl = ri * self.grounding_line_flux(Hi, um, vm, ice & (phi >= 0.5), ice) / spy
         zero = np.zeros_like(H)
         out = {
-            "lithk": (Hi, None, 0.0),
-            "orog": (np.where(ice, base + H, np.maximum(self.bed, 0.0)), None, np.nan),
-            "topg": (self.bed, None, np.nan),
-            "base": (base, icef, np.nan),
+            "lithk": (Hi, domf, 0.0),
+            "orog": (base + Hi, domf, np.nan),
+            "topg": (self.bed, domf, np.nan),
+            "base": (base, domf, np.nan),
             "xvelmean": (um / spy, icef, np.nan), "yvelmean": (vm / spy, icef, np.nan),
+            "xvelsurf": (us / spy, icef, np.nan), "yvelsurf": (vs / spy, icef, np.nan),
             "xvelbase": (ub / spy, icef, np.nan), "yvelbase": (vb / spy, icef, np.nan),
             "strbasemag": (tau_b, icef, np.nan),
-            "acabf": (fr["smb"].astype("float64") * ri / spy, icef, np.nan),
-            "libmassbfgr": (zero, None, 0.0), "libmassbffl": (zero, None, 0.0), "lifmassbf": (zero, None, 0.0),
+            "acabf": (fr["smb"].astype("float64") * ri / spy, domf, np.nan),
+            "libmassbfgr": (zero, grf, np.nan), "libmassbffl": (zero, flf, np.nan),
+            "lifmassbf": (zero, None, 0.0),
             "dlithkdt": (fr["dhdt"].astype("float64") / spy, None, 0.0),
             "licalvf": (calv, None, 0.0),
             "ligroundf": (gl, None, 0.0),
@@ -333,7 +381,8 @@ class Physics:
             "iareagr": float((phi * ice).sum()) * A, "iareafl": float(((1.0 - phi) * ice).sum()) * A,
             "tendacabf": float((out["acabf"][0] * ice).sum()) * A,
             "tendlibmassbfgr": 0.0, "tendlibmassbffl": 0.0, "tendlifmassbf": 0.0,
-            "tendlicalvf": float(calv.sum()) * A, "tendligroundf": float(gl.sum()) * A,
+            # the scalar totals are magnitudes in the request (ranges [0, 1e25])
+            "tendlicalvf": float(abs(calv.sum())) * A, "tendligroundf": float(gl.sum()) * A,
         }
         return out, frac, scal
 
@@ -367,12 +416,12 @@ class Writer:
             nc.setncattr(k, v)
         nc.title = f"GLIDE export - {name}"
         nc.createDimension("time", None)
-        t = nc.createVariable("time", "f8", ("time",))
+        t = nc.createVariable("time", "f4", ("time",))
         t.units, t.calendar, t.axis, t.standard_name = TIME_UNITS, TIME_CALENDAR, "T", "time"
         t[:] = [_time(y, mode) for y in years]
         if mode == "FL":
             nc.createDimension("bnds", 2)
-            tb = nc.createVariable("time_bnds", "f8", ("time", "bnds"))
+            tb = nc.createVariable("time_bnds", "f4", ("time", "bnds"))
             tb.units, tb.calendar = TIME_UNITS, TIME_CALENDAR
             tb[:, :] = [[date2num(datetime(y, 1, 1), TIME_UNITS, TIME_CALENDAR),
                          date2num(datetime(y + 1, 1, 1), TIME_UNITS, TIME_CALENDAR)] for y in years]
@@ -419,8 +468,11 @@ def main():
     ap.add_argument("--years", type=int, nargs=2, default=None, metavar=("Y0", "Y1"),
                     help="first and last model year (default: the core experiment's window, clipped to the run)")
     ap.add_argument("--resolution", type=float, default=1000.0, help="output grid spacing (m): 1000, 2000, 4000, 8000, 16000")
-    ap.add_argument("--config-id", default=None, help="default: the core experiment id of (experiment, esm)")
-    ap.add_argument("--out-dir", default=None, help="default: <run-dir>/ismip7_<experiment>")
+    ap.add_argument("--group", default=GROUP, help="group id in the file name (field 3)")
+    ap.add_argument("--set-counter", default="C001", help="parameter-set id (C/E/P + 3 digits), shared by the core experiments")
+    ap.add_argument("--submission-dir", default=None,
+                    help="root of the submission tree; files go to <root>/Models/GrIS/<group>/<model>/CORE/<set>/ "
+                         "(default: <run-dir>/../ISMIP7_submission)")
     ap.add_argument("--variables", nargs="*", default=None, help="subset of the variable names")
     a = ap.parse_args()
 
@@ -429,9 +481,20 @@ def main():
     src = FrameSource(run_dir)
     frames = [(t, None) for t in src.times]
     by_time = src.index
-    config_id, window = CORE.get((a.experiment, a.esm), (a.config_id or "C000", None))
-    config_id = a.config_id or config_id
-    y0, y1 = a.years if a.years else (window if window else (int(frames[0][0]), int(frames[-1][0]) - 1))
+    window = EXPERIMENTS.get(a.experiment)
+    if a.years:
+        y0, y1 = a.years
+    elif window:
+        y0, y1 = window
+        if a.experiment == "historical":            # the modeller's start: the first yearly frame pair
+            first = next((int(round(t)) for k, t in enumerate(src.times[:-1])
+                          if abs(src.times[k + 1] - t - 1.0) < 1e-6), 1850)
+            y0 = max(y0, first)
+    else:
+        y0, y1 = int(frames[0][0]), int(frames[-1][0]) - 1
+    if window and (y1 != window[1] or (a.experiment != "historical" and y0 != window[0])):
+        print(f"WARNING: {a.experiment} must cover {window[0]}-{window[1]} ({y0 if a.experiment == 'historical' else window[0]}-{window[1]} "
+              f"for this run); {y0}-{y1} will fail the checker's time test")
     y1 = min(y1, int(round(frames[-1][0])) - 1)
     years = list(range(y0, y1 + 1))
     # model year y = the step (y, y + 1]: its frame must exist, and so must the
@@ -457,7 +520,7 @@ def main():
         "Conventions": "CF-1.7", "ismip7_version": "7.0", "institution": "University of Montana",
         "source": f"GLIDE ice sheet model (MOLHO), enthalpy SMB model, forced by {a.esm}",
         "contact_name": "Doug Brinkerhoff", "contact_email": "doug.brinkerhoff@mso.umt.edu",
-        "model": MODEL, "group": PROJECT, "grid_type": REGION, "experiment": a.experiment, "esm": a.esm, "set": config_id,
+        "model": MODEL, "group": a.group, "grid_type": REGION, "experiment": a.experiment, "esm": a.esm, "set": a.set_counter,
         "crs": "EPSG:3413", "proj_params": "+proj=stere +lon_0=-45 +lat_ts=70 +lat_0=90 +x_0=0 +y_0=0",
         "native_resolution_m": grid.dx, "output_resolution_m": float(a.resolution),
         "calving": (f"cell sink (1 - psi) H / tau, tau = {phys.tau_c:g} a, psi the monotone gap-blended "
@@ -472,21 +535,27 @@ def main():
         if k in meta:
             attrs[f"run_{k}"] = meta[k]
 
-    out_dir = Path(a.out_dir) if a.out_dir else run_dir / f"ismip7_{a.experiment}"
+    root = Path(a.submission_dir) if a.submission_dir else run_dir.parent / "ISMIP7_submission"
+    out_dir = root / "Models" / REGION / a.group / MODEL / "CORE" / a.set_counter
     out_dir.mkdir(parents=True, exist_ok=True)
+    config_id = a.set_counter
     period = f"{years[0]}-{years[-1]}"
-    fname = lambda v: out_dir / (f"{v}_{REGION}_{PROJECT}_{MODEL}_{ISM_MEMBER}_{a.esm}_{FORCING_ID}_"
+    fname = lambda v: out_dir / (f"{v}_{REGION}_{a.group}_{MODEL}_{ISM_MEMBER}_{a.esm}_{FORCING_ID}_"
                                  f"{a.experiment}_{config_id}_{period}.nc")
+    with open(out_dir / "not_modelled.txt", "w") as f:
+        f.write("# ISMIP7: non-mandatory variables this model does not represent (read by the compliance checker)\n")
+        for v, why in NOT_MODELLED.items():
+            f.write(f"{v:14s} # {why}\n")
     want = set(a.variables) if a.variables else set(GRID_VARS) | set(SCALAR_VARS)
     unknown = want - set(GRID_VARS) - set(SCALAR_VARS)
     if unknown:
         raise SystemExit(f"unknown variables {sorted(unknown)}")
     writers = {v: Writer(fname(v), v, GRID_VARS[v], years, attrs, grid) for v in GRID_VARS if v in want}
     writers.update({v: Writer(fname(v), v, SCALAR_VARS[v], years, attrs) for v in SCALAR_VARS if v in want})
-    print(f"{a.experiment} ({config_id}) {period}: {len(years)} years, {len(writers)} variables, "
+    print(f"{a.experiment} (set {config_id}) {period}: {len(years)} years, {len(writers)} variables, "
           f"{a.resolution:g} m grid {len(grid.y)} x {len(grid.x)} from {src.kind} -> {out_dir}")
 
-    names = ["H", "smb", "dhdt", "mask", "phi", "psi", "xi", "U", "U_b"]
+    names = ["H", "smb", "dhdt", "mask", "phi", "psi", "xi", "U", "U_s", "U_b"]
     try:
         for k, y in enumerate(years):
             out, frac, scal = phys.fields(src.get(y + 1.0, names))
