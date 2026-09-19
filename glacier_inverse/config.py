@@ -480,6 +480,21 @@ class GlacierConfig:
     # legacy endpoint trapezoid) and is held at its step mean in every mode.
     anomaly_integration: str = "mean_anomaly"
 
+    # Year-by-year forcing for the years a reanalysis record covers (see
+    # yearly_climate.py; the file comes from preprocessing/make_climate_yearly.py
+    # and holds per-(year, month) t2m anomalies and precip ratios relative to
+    # the model's own climatology). None keeps the climatology + scalar index
+    # anomaly for every year. When set, a step's overlap with a record year
+    # is one SMB evaluation on that year's fields (plus the biases; the
+    # index anomaly is not applied to those years) and the rest of the step
+    # keeps the `anomaly_integration` treatment. Requires
+    # base_anomaly_year=None: the fields are departures from the climatology
+    # window, so a base year has no meaning. `yearly_climate_cache`: "ram"
+    # holds the record's int16 codes in pinned host memory (~230 MB per year
+    # at 1 km), "none" reads them from the file at every SMB evaluation.
+    yearly_climate_filename: Optional[str] = None
+    yearly_climate_cache: str = "ram"
+
     # Field priors (Matern)
     bed_prior:      PriorHyperparams = PriorHyperparams(sigma=500.0,    l=2000.0,  nu=1)
     mean_prior:     PriorHyperparams = PriorHyperparams(sigma=1000.0,   l=10000.0, nu=1)

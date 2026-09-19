@@ -55,6 +55,38 @@ def year_overlap_weights(t0: float, t1: float, eps: float = 1e-9) -> list:
     return [(y, w / total) for y, w in out]
 
 
+class YearField:
+    """An anomaly term that is a reanalysis YEAR (config.yearly_climate_filename)
+    rather than a scalar index anomaly. Only the year travels through the
+    checkpointed SMB fn's arguments; the (12, ny, nx) fields are materialized
+    from the YearlyClimate loader inside it (and again in the backward
+    recompute) so they never sit on the tape — see yearly_climate.py."""
+    __slots__ = ("year",)
+
+    def __init__(self, year: int):
+        self.year = int(year)
+
+    def __repr__(self):
+        return f"YearField({self.year})"
+
+
+def _term_forcing(a, tbias, base_anomaly, precip_step, precip_, yearly):
+    """(temperature shift, precip field) of one anomaly term.
+
+    Scalar term: the index anomaly folded into the (ny, nx) bias (one
+    (12, ny, nx) temporary in the caller's add); precip is the step's
+    index-scaled field. YearField term: the year's (12, ny, nx) anomaly
+    (+ bias) and the year's ratio on the biased climatology — the step's
+    index precip multiplier does not apply to record years.
+    """
+    if isinstance(a, YearField):
+        d = yearly.t2m_anomaly(a.year)
+        shift = d if tbias is None else d + tbias
+        return shift, precip_ * yearly.precip_ratio(a.year)
+    shift = (a - base_anomaly) if tbias is None else tbias + (a - base_anomaly)
+    return shift, precip_step
+
+
 def _finish_smb(smb, domain_mask, level, want_fine):
     # Mask, then restrict to the dynamics level *inside* the checkpoint:
     # avg_pool2d saves its input for backward, so restricting outside would
@@ -70,7 +102,7 @@ def _finish_smb(smb, domain_mask, level, want_fine):
 
 def compute_smb(smb_model, t2m, tbias, anomaly_terms, base_anomaly, precip_,
                 precip_multiplier, debris, mf, rf, domain_mask,
-                level=0, want_fine=False):
+                level=0, want_fine=False, yearly=None):
     # `precip_multiplier` is a scalar applied here, inside the checkpoint, so the
     # full (12, ny, nx) scaled precip field is recomputed in backward rather than
     # stored per time step (otherwise ~50 full-grid copies are retained).
@@ -99,9 +131,10 @@ def compute_smb(smb_model, t2m, tbias, anomaly_terms, base_anomaly, precip_,
     smb = None
     for a, w in anomaly_terms:
         # Fold the scalar anomaly into the (ny, nx) bias first so the sum
-        # allocates a single (12, ny, nx) temporary.
-        shift = (a - base_anomaly) if tbias is None else tbias + (a - base_anomaly)
-        s = glare_step(smb_model, t2m + shift, precip_step,
+        # allocates a single (12, ny, nx) temporary. `yearly` terms (YearField)
+        # materialize the year's fields here, inside the checkpoint.
+        shift, precip_term = _term_forcing(a, tbias, base_anomaly, precip_step, precip_, yearly)
+        s = glare_step(smb_model, t2m + shift, precip_term,
                        mf, rf, debris).mean(axis=0)
         smb = w * s if smb is None else smb + w * s
     return _finish_smb(smb, domain_mask, level, want_fine)
@@ -111,7 +144,7 @@ def compute_smb_enthalpy(smb_model, t2m, tbias, anomaly_terms, base_anomaly,
                          precip_, precip_multiplier, insol_mean, insol_dif, t_base,
                          H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0,
                          albedo_snow, albedo_ice, M_albedo, debris, temp_dev,
-                         domain_mask, level=0, want_fine=False):
+                         domain_mask, level=0, want_fine=False, yearly=None):
     # Same contract as compute_smb (annual-mean smb, -10 fill outside the
     # domain, weighted mean over `anomaly_terms`, level restriction inside the
     # checkpoint), with the enthalpy core in place of the temperature index.
@@ -137,8 +170,8 @@ def compute_smb_enthalpy(smb_model, t2m, tbias, anomaly_terms, base_anomaly,
     q_sw_dif = q_sw_dif.expand(shape).contiguous()
     smb = None
     for a, w in anomaly_terms:
-        shift = (a - base_anomaly) if tbias is None else tbias + (a - base_anomaly)
-        s = enthalpy_step(smb_model, t2m + shift, precip_step,
+        shift, precip_term = _term_forcing(a, tbias, base_anomaly, precip_step, precip_, yearly)
+        s = enthalpy_step(smb_model, t2m + shift, precip_term,
                           insol_mean, insol_dif, t_base, H_atm, H_base0, q_sw_bulk,
                           q_sw_insol, q_sw_dif, q_lw0, albedo_snow, albedo_ice,
                           M_albedo, debris, temp_dev).mean(axis=0)
@@ -401,6 +434,7 @@ def simulate(
     time_writer=None,
     ocean_forcing=None,
     dt_schedule=(),
+    yearly_climate=None,
 ) -> SimResult:
     """Run the forward model on coarse `level` over a snapped step sequence.
 
@@ -454,6 +488,15 @@ def simulate(
     integral of the forcing). The precip-anomaly multiplier follows the same
     weights ("end" keeps its legacy endpoint trapezoid) and is held at its
     step mean in every mode.
+
+    `yearly_climate` (a yearly_climate.YearlyClimate, or None) replaces the
+    index anomaly by the reanalysis year's own fields for every calendar year
+    it covers: each such year overlapped by a step is one SMB evaluation
+    (a YearField term, weight = the overlap), and the step's remaining years
+    keep the `anomaly_integration` treatment with their weights renormalized
+    among themselves. The index precip multiplier likewise applies only to
+    the remaining years. In "end" mode a step whose end year is on record is
+    the whole-step evaluation on that year.
     """
     record_states_at = [float(t) for t in (record_states_at or [])]
     record_volumes_at = [float(t) for t in (record_volumes_at or [])]
@@ -489,6 +532,9 @@ def simulate(
     year_max = int(temperature_anomaly.time.max().item())
     p_year_max = (int(precip_anomaly.time.max().item())
                   if precip_anomaly is not None else None)
+
+    def raw_years(index, w_index):
+        return [(y, w / w_index) for y, w in index]
 
     def anomaly_year(t: float, y_max: int) -> int:
         # Round before truncating so 2011.9999999 reads as 2012, matching the
@@ -528,30 +574,44 @@ def simulate(
         # checkpointed smb fn as a weighted mean of smb fields (weights sum
         # to 1). Raw annual values are merged before scaling so years beyond
         # the record (clamped to year_max) collapse into a single evaluation.
+        on_record = (lambda y: yearly_climate is not None and yearly_climate.has(y))
         if anomaly_integration == "end":
-            anomaly_terms = (
-                (alpha_t2m * t_anom[anomaly_year(t_next, year_max)], 1.0),)
+            y_end = int(round(t_next, 9))
+            if on_record(y_end):
+                anomaly_terms = ((YearField(y_end), 1.0),)
+            else:
+                anomaly_terms = ((alpha_t2m * t_anom[min(y_end, year_max)], 1.0),)
             weights = None
         else:
             weights = year_overlap_weights(t_prev, t_next)
-            raw = [(t_anom[min(y, year_max)], w) for y, w in weights]
-            if anomaly_integration == "mean_anomaly":
-                anomaly_terms = (
-                    (alpha_t2m * sum(a * w for a, w in raw), 1.0),)
+            # Record years are their own terms; the index years share the
+            # rest of the step's weight, renormalized among themselves so
+            # the mean-anomaly term is the mean over THOSE years.
+            field_terms = tuple((YearField(y), w) for y, w in weights if on_record(y))
+            index = [(y, w) for y, w in weights if not on_record(y)]
+            w_index = sum(w for _, w in index)
+            raw = [(t_anom[min(y, year_max)], w / w_index) for y, w in index] if index else []
+            if not raw:
+                anomaly_terms = field_terms
+            elif anomaly_integration == "mean_anomaly":
+                anomaly_terms = field_terms + (
+                    (alpha_t2m * sum(a * w for a, w in raw), w_index),)
             else:  # "annual"
                 merged: dict = {}
                 for a, w in raw:
                     merged[a] = merged.get(a, 0.0) + w
-                anomaly_terms = tuple(
-                    (alpha_t2m * a, w) for a, w in merged.items())
+                anomaly_terms = field_terms + tuple(
+                    (alpha_t2m * a, w * w_index) for a, w in merged.items())
 
         if p_anom is not None:
             if anomaly_integration == "end":
                 p_ratio = 0.5 * (p_anom[anomaly_year(t_prev, p_year_max)]
                                  + p_anom[anomaly_year(t_next, p_year_max)]) / base_precip
-            else:
+            elif index:
                 p_ratio = sum(w * p_anom[min(y, p_year_max)]
-                              for y, w in weights) / base_precip
+                              for y, w in raw_years(index, w_index)) / base_precip
+            else:
+                p_ratio = 1.0
             precip_multiplier = 1.0 + alpha_precip * (p_ratio - 1.0)
         else:
             precip_multiplier = 1.0
@@ -571,13 +631,13 @@ def simulate(
                         H_atm, ec["H_base0"], ec["q_sw_bulk"], q_sw_insol, q_sw_dif,
                         ec["q_lw0"],
                         ec["albedo_snow"], ec["albedo_ice"], ec["M_albedo"],
-                        debris, temp_dev, domain_mask, level, want_fine)
+                        debris, temp_dev, domain_mask, level, want_fine, yearly_climate)
         else:
             smb_fn = compute_smb
             smb_args = (smb_model,
                         t2m, tbias, anomaly_terms, base_anomaly, precip_, precip_multiplier,
                         debris,
-                        mf, rf, domain_mask, level, want_fine)
+                        mf, rf, domain_mask, level, want_fine, yearly_climate)
 
         if ocean_forcing is not None:
             q_f, h0_f, _ = ocean_forcing.margins(t_prev, t_next)

@@ -121,6 +121,52 @@ and forth by diff):
    upper bound on the basal traction coefficient, clamped on the fine-level
    log beta before restriction in `problem.simulate`. Greenland sets 20; see
    the level-0 adjoint divergence paragraph below.
+9. **Year-by-year forcing over the reanalysis record (2026-09-18)**:
+   `config.yearly_climate_filename` (None = the Alaska behaviour; Greenland
+   `gridded_climate_yearly.nc`, `preprocessing/make_climate_yearly.py`) +
+   `yearly_climate.py` + `forward.YearField`. The file holds per-(year,
+   month) `t2m_anom` (K) and `precip_ratio` relative to GLIDE_inputs' own
+   climatology as int16 codes (0.002 K / 0.002), UNCOMPRESSED and chunked per
+   (year, month) — the working format, 9.3 GB for CARRA2 1986-2025 at 1 km
+   (record-mean anomaly 0.0000 K over the ice, max monthly cell mean 0.27 K
+   from the per-year lapse correction; 0 ratios capped). `forward.simulate`
+   makes every record year a step overlaps its own term `(YearField(y), w)`
+   — one glare evaluation on `t2m_clim + anom(y) + tbias`,
+   `precip_clim * pbias * ratio(y)` — and folds the remaining years into the
+   usual `anomaly_integration` term with their weights renormalized (the
+   1980-1990 step is 4 field terms + one mean-anomaly term at weight 0.6;
+   with the 1-yr schedule after 1990 every step is one evaluation, so the
+   cost is unchanged). The index precip multiplier applies to index years
+   only. **Tape budget**: a year is 460 MB float32 at 1 km and a level-0 run
+   overlaps 40, so the fields never enter the checkpointed SMB fn as
+   tensors; it receives the `YearlyClimate` loader + the year (non-tensor
+   args, like the scalar anomalies), decodes the codes on the GPU inside the
+   checkpoint, and decodes them again in the backward recompute — nothing
+   persists on the tape, the transient is one year's pair (+2.7 GB peak at
+   level 2, forward+backward 1.5+1.3 s for 5 steps, gradients checked
+   finite). `yearly_climate_cache="ram"` pins the int16 codes in host RAM
+   (9.3 GB, one ~20 ms H2D per evaluation); `"none"` reads them from the file
+   each time (page cache). Requires `base_anomaly_year=None` (raises
+   otherwise). `forward_standalone.compute_smb` follows the same rule (so
+   replays and `forward_projection --pre-record standalone` are consistent
+   with the inversion; `YearlyClimate` with cache "none" there). Set the
+   filename to None for the pre-2026-09-18 behaviour. Motivation: the OCX
+   paragraph below.
+10. `observations.SnowlineSpec(window=)` (2026-09-18): the model probability
+   of the snowline term is the mean over a WINDOW of seasons of
+   `sigmoid(SMB_year / s_smb)`, one step per year (the step ending at
+   year + 1 carries that year's forcing), instead of the single nominal
+   epoch — `window=(y0, y1)` or `"file"` (the product's
+   time_start..time_end); None is the historical single-epoch term. The
+   Greenland label is the fraction of the 2000-2020 seasons that ended with
+   snow (`preprocessing/make_snowline.py`, see the snowline paragraph
+   below), so under the yearly forcing the mean of the per-year
+   probabilities is the model's fraction of seasons; the single-epoch term
+   would compare the 21-year composite with ONE year's weather (2009's).
+   The logit nuisance sees the averaged probability and slope. Records 21
+   states (each keeps its fine SMB, 19 MB at 1 km); coarse-domain test:
+   +0.7 GB, +1.7 s backward at level 2. `greenland_coarse` has the file
+   too (smoke test includes the term).
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
@@ -290,6 +336,99 @@ forward_standalone's file) carries the marine fill since 2026-09-17; the old
 product is kept as `thermal_forcing_nearest.nc`. `make_ismip7_forcing.py
 --fill-method` defaults to marine, so the ISMIP7 records need a rebuild to
 pick it up (done 2026-09-17 for ssp126 and ssp370).
+
+**ctrl forcing (2026-09-18): `make_ismip7_forcing.py --scenario ctrl`** builds
+the ISMIP7 control the way the kit builds its own (the kit's ctrl years are
+bit-identical repeats of a climatology): the monthly tas / pr climatology
+over `--ctrl-years` (2000-2029) of historical + `--ctrl-from` (ssp126) in OUR
+product (dEBM2), written once to `ctrl_climatology.nc` on the native grid in
+the kit's units, with every ctrl year of the catalogue pointing at it; the
+anomaly reference (1986-2025) uses the real ssp126 years as for every other
+run; the ocean is the kit's ctrl tf. Why not the kit's ctrl atmosphere: it
+exists only as SDBN1 (CESM, 51 of 286 tas files on disk) / GEMB-SDBN1 (MRI),
+neither with a historical to splice against, and SDBN1 is +1.0 K warmer than
+dEBM2 in JJA over the ice, which would appear as a step at 2015. The dEBM2
+ctrl sits +0.58 K (annual) / x1.04 precip above the 1986-2025 reference.
+
+**OCX forcing (2026-09-18): CARRA2 year by year.** ISMIP7's observationally
+constrained experiment wants reanalysis forcing; the consistent choice for a
+model calibrated on CARRA2 T100 is CARRA2 itself, not the kit's RACMO 2 m.
+`preprocessing/make_carra_yearly.py` runs `make_carra_vars.build_climate
+(years=[y])` per year (1986-2025) and writes tas (K) / pr (kg m-2 s-1)
+files in the kit's layout to `ismip7_data/CARRA2/ocx/carra2-1000m/`;
+`make_ismip7_forcing.py --gcm CARRA2 --scenario ocx --atm carra2-1000m
+--pre-years 1986 2015 --skip-ocean` builds `model_inputs/ismip7/CARRA2_ocx/`
+(its `thermal_forcing.nc` is a symlink to the EN4 marine-fill file); the
+climatology of the yearly files equals the model's `gridded_climate.nc`
+to 1e-4 K / 1e-4 m/yr. `forward_projection.py --gcm CARRA2 --scenario ocx
+--mode raw --pre-record standalone` feeds the raw fields + calibrated
+biases from 1986 and forward_standalone's forcing (CARRA2 climatology +
+0.6 x Vinther, no precip variability) before. Result vs the standalone run
+(same checkpoint, 1850-2026, no elevation feedback; `analysis/output/
+basin_mb_ocx/`, `basin_mass_balance.py` now reads compressed VTI via
+`ismip_exporter.read_vti`): discharge identical (447 vs 450 Gt/yr, Mankoff
+D+BMB 485), the interannual SMB PATTERN is captured far better (GrIS
+correlation with Mankoff SMB 0.58 -> 0.96; per region 0.08-0.64 -> 0.88-0.97,
+SE/CW/NW going from no skill to 0.94-0.97), but the AMPLITUDE is 1.6x too
+large (GrIS SMB std 181 vs Mankoff 110 Gt/yr; regression slope 1.57;
+dSMB/dT_jja -139 vs -80 Gt/yr/K on the same CARRA2 ice-mean JJA series;
+2012 -185 vs +87, 2019 -252 vs +96) and the mean drops 60 Gt/yr (1986-2025
+SMB 245 vs standalone 307, Mankoff 337; 2006-2025 166 vs 293), so the mass
+balance goes from -144 (Mankoff -148) to -200 Gt/yr and the SMB trend
+doubles (-56 vs -27 Gt/yr/decade). The mean forcing is identical, so the
+mean shift is Jensen's inequality with the model's SMB curvature
+(~-160 Gt/yr/K^2 implied) applied to the full 1.06 K interannual std
+instead of the index's 0.6 K: the calibrated state is more melt-prone than
+the real weather allows, and a too-melt-prone state also has the excess
+sensitivity. Since both dh/dt windows (1992-2019, 2019-2026) lie inside the
+CARRA2 record, the inversion should be forced with the yearly fields
+directly (Vinther only before 1986) so the calibration and OCX see the same
+weather — implemented the same day as library change 9
+(`yearly_climate_filename`; the next inversion runs on it). Runs: `inverse/projection_CARRA2_ocx` (1800-2026, with
+elevation feedback), `projection_CARRA2_ocx_nofb` (1850-2026, without; the
+clean comparison). The checker has no OCX row, so its files need the
+experiment table extended before submission.
+
+**Snowline product (2026-09-18): `preprocessing/make_snowline.py` ->
+`gridded_snowline.nc`.** `common_data/snowlines/<year>_snowline.zip`
+(2000-2020) hold the MODIS-era end-of-summer snowline as polylines on a
+500 m lattice, polar stereographic lon_0 0 / lat_ts 60 (the .prj's
+latitude_of_origin; lat_ts 70 puts the vertices 400 m too high on the DEM).
+Every part is a closed ring (664 in 2012, one 19,464 km long), i.e. the
+boundary of the snow-covered region: nesting depth 1 = snow (1.49 M km2 at
+1300-3050 m in 2012), 0 = bare ice / off ice, 2 = bare patches in the snow,
+3 = snow in those — snow = odd depth, rasterized with rasterio's additive
+merge on the 500 m lattice (the domain grid halved), averaged to 1 km and
+divided by `ice_fraction` (clipped at 1). An elevation-based reconstruction
+(DEM above the IDW snowline elevation of the nearest vertices) was tried
+first and mislabels wedges beside the small rings and the low northern
+interior; dropped. `snow_fraction` = mean of the 21 yearly labels (the
+fraction of seasons ending with snow; time attrs 2000/2010/2020),
+`glacier_fraction` = ice_fraction, 0 on the 128 k peripheral cells the
+product never classified (rgi_periphery_fraction > 0.5, no ring within 5 km
+in any year), `snow_label` (year, y, x) int8 %. Bare-ice area 243 k (2002)
+to 354 k km2 (2019), 2012 342 k, mean 296 k; the ablation zone is up to
+100 km wide in the SW. The Greenland config's SnowlineSpec uses
+`window="file"` (library change 10), so the next inversion carries the
+term — the run started 2026-09-18 (before the file existed) does not.
+**First inversion with it (`inverse_v2`, yearly forcing + ONE-SIDED snowline
+term, 2026-09-19; `analysis/output/basin_mb_v2/`)**: the old state's ELA was
+~350 m too high against the product (model bare-ice area 291-347 k km2 vs
+187 k on the common mask; P(snow) at 1200-1400 m 0.36-0.46 vs label
+0.71-0.88), and that oversized ablation zone WAS the excess SMB sensitivity:
+with the snowline term the interannual SMB matches Mankoff (std 117 vs 110
+Gt/yr, regression slope 1.01, dSMB/dT_jja -74 vs -80, r 0.95, regional stds
+within 10-25 %; was std 181 / slope 1.57 / -139). But the MEAN overshoots:
+SMB 555 vs 337 Gt/yr, D 590 vs 485, MB -35 vs -148 (2006-2025 -87 vs -218),
+bare-ice area 130 k (now too SMALL), P(snow) above the label in every band
+over 200 m; tbias -0.5 K (-1.2 K at 800-1400 m), H_atm 14.8 -> 12.7, and
+pbias UP 8 % (precip 944 Gt/yr vs CARRA2 raw 911, RCMs ~750). Cause: the
+default `two_sided=False` scores only "snow observed, model bare", so with a
+fractional label nothing resists snow below the snowline and raising precip
+is free. The config is on `two_sided=True` since 2026-09-19 (the product
+classifies both sides on the main sheet; not yet rerun). Expect SMB ~470 Gt/yr at the label's bare-ice area by
+interpolation — the remaining ~130 Gt/yr over Mankoff is CARRA2's precip
+excess, which then has to come out of pbias against dh/dt.
 
 **ISMIP7 projections (2026-09-16): `forward_projection.py` +
 `preprocessing/make_ismip7_forcing.py`.** The projection driver imports

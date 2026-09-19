@@ -24,7 +24,7 @@ working unchanged).
 import dataclasses
 import warnings
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import cupy as cp
 import torch
@@ -946,6 +946,15 @@ class SnowlineObservation(Observation):
     fraction, so only "snow observed, model bare" is penalized — the model may
     keep snow below the observed snowline for free. `two_sided=True` is the
     full Brier score against the fraction, penalizing both directions.
+
+    `times` (default: the single composite epoch) lists the emission times
+    whose step SMBs the model probability averages over: P = mean over the
+    times of sigmoid(SMB_t / s_smb). For a label that is the fraction of
+    SEASONS with snow (Greenland: 21 yearly snowlines) under year-by-year
+    forcing, the times are the step ends carrying those years, and the mean
+    of the per-year probabilities is the model's fraction of seasons —
+    averaging the SMBs first would compare the composite with one year's
+    weather (and the sigmoid of a mean is not the mean of sigmoids).
     """
 
     name = "snow"
@@ -953,20 +962,22 @@ class SnowlineObservation(Observation):
     def __init__(self, *, snow_label, snow_mask, time: float, s_smb: float,
                  weight: LossWeight, two_sided: bool = False,
                  logit_nuisance: Optional[LogitNuisance] = None,
-                 sigma_p: Optional[float] = None):
+                 sigma_p: Optional[float] = None,
+                 times: Optional[Sequence[float]] = None):
         super().__init__(weight=weight)
         self.logit_nuisance = logit_nuisance
         self.sigma_p = sigma_p
         self.snow_label = snow_label
         self.snow_mask = snow_mask
         self.time = time
+        self.times = tuple(float(t) for t in times) if times else (float(time),)
         self.s_smb = s_smb
         self.two_sided = two_sided
         self._targets = {0: (snow_mask, snow_label)}
 
     @property
     def required_times(self):
-        return (self.time,)
+        return self.times
 
     def _target_at(self, level: int):
         """(snow_mask, snow_label) box-restricted to `level`: the mask
@@ -980,9 +991,10 @@ class SnowlineObservation(Observation):
     def loss(self, *, sim, physical, config, domain, mask, dx, weight):
         # Evaluated on the snapshot's own grid (see ExtentObservation.loss
         # for why the Brier on box-averaged targets is the right coarse form).
-        state = sim.at(self.time)
-        level = state.level
-        logits = state.smb_coarse / self.s_smb
+        states = [sim.at(t) for t in self.times]
+        level = states[0].level
+        logits = [st.smb_coarse / self.s_smb for st in states]
+        n_t = float(len(logits))
         snow_mask, snow_label = self._target_at(level)
         if self.two_sided:
             omega, target = snow_mask, snow_label
@@ -997,16 +1009,18 @@ class SnowlineObservation(Observation):
         prior = None
         if self.logit_nuisance is not None and weight > 0.0:
             with torch.no_grad():
-                ld = logits.detach()
+                ld = [lg.detach() for lg in logits]
 
                 def p_g(e):
-                    s = torch.sigmoid(ld + e)
-                    return s, s * (1 - s)
+                    # mean over the times of the per-time probability and slope
+                    s = sum(torch.sigmoid(l + e) for l in ld) / n_t
+                    g = sum((lambda q: q * (1 - q))(torch.sigmoid(l + e)) for l in ld) / n_t
+                    return s, g
                 eps, prior = self.logit_nuisance.solve(
                     level=level, dx_level=dx * 2 ** level,
                     p_g=p_g, omega=omega, target=target, c=c_data)
 
-        y = torch.sigmoid(logits + eps)
+        y = sum(torch.sigmoid(lg + eps) for lg in logits) / n_t
         J = config.loss_scale * c_data * (omega * (target - y) ** 2).sum()
         if prior is not None:
             J = J + config.loss_scale * prior
@@ -1015,7 +1029,7 @@ class SnowlineObservation(Observation):
     def residuals(self, *, sim, physical, config, domain, mask, dx):
         if self.logit_nuisance is None:
             return {}
-        eps = self.logit_nuisance.eps_at(sim.at(self.time).level)
+        eps = self.logit_nuisance.eps_at(sim.at(self.times[0]).level)
         return {} if eps is None else {"logit_eps": eps}
 
     def diagnostics(self):
@@ -1459,6 +1473,13 @@ class SnowlineSpec:
     # Per-pixel snow-fraction noise std; same contract as ExtentSpec.sigma_p
     # (legacy weight ↔ σ_p = 0.25/√(2·weight·dx²)).
     sigma_p: Optional[float] = None
+    # Composite over a window of seasons: (first year, last year) inclusive,
+    # or "file" for the product's time_start..time_end. The model probability
+    # is the mean over those years of sigmoid(SMB / s_smb), each year taken
+    # from the step ending at year + 1 (the step (y, y+1] carries year y's
+    # forcing; the schedule must resolve those years). None: the single
+    # nominal epoch (`time`), the historical behaviour.
+    window: Optional[object] = None
 
     def build(self, ctx: ObservationBuildContext) -> Optional[SnowlineObservation]:
         sd = ctx.snowline_data
@@ -1485,8 +1506,16 @@ class SnowlineSpec:
         ).nan_to_num()
         snow_mask = ((glacier_fraction > 0.0) & domain_mask).to(torch.float32)
         snow_label = snow_label.masked_fill(snow_mask == 0.0, 0.0)
+        times = None
+        if self.window is not None:
+            if self.window == "file":
+                _, t0, t1 = read_time_attrs(sd.snow_fraction, fallback=time,
+                                            what="snowline composite (snow_fraction)")
+            else:
+                t0, t1 = self.window
+            times = [float(y) + 1.0 for y in range(int(round(t0)), int(round(t1)) + 1)]
         return SnowlineObservation(
-            snow_label=snow_label, snow_mask=snow_mask, time=time,
+            snow_label=snow_label, snow_mask=snow_mask, time=time, times=times,
             s_smb=self.s_smb, weight=self.weight, two_sided=self.two_sided,
             logit_nuisance=(LogitNuisance(self.logit_error,
                                           self.nuisance_inner_steps,

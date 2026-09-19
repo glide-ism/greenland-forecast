@@ -138,6 +138,52 @@ def monthly_climatology(files: dict, var: str, years, template: xr.DataArray,
     return clim
 
 
+def write_ctrl_climatology(files: dict, years, out_path: Path, gcm: str, atm: str, source: str) -> Path:
+    """The ISMIP7 control forcing built the way the kit builds its own ctrl
+    files: the monthly climatology of tas and pr over `years` (2000-2029 of
+    historical + ssp126), written ONCE on the native grid in the kit's units
+    and layout (the kit's ctrl years are bit-identical repeats of such a
+    climatology). The catalogue points every ctrl year at this file, so the
+    driver reads it like any kit year. Using our own dEBM2 climatology keeps
+    the ctrl run in the same downscaling product as the historical and
+    scenario runs; the kit's ctrl atmosphere exists only in SDBN1 /
+    GEMB-SDBN1, which has no historical to splice against."""
+    acc, n, ref = {}, {}, {}
+    footprint = None
+    for y in years:
+        for var in ('tas', 'pr'):
+            f = files.get(y, {}).get(var)
+            if f is None:
+                continue
+            da = _open_native(f, var)
+            a = da.values.astype('float64')
+            if a.shape[0] != 12:
+                raise ValueError(f"{f}: {a.shape[0]} months")
+            acc[var] = acc.get(var, 0.0) + np.nan_to_num(a)
+            n[var] = n.get(var, 0) + 1
+            if var not in ref:
+                ref[var] = xr.open_dataset(f, decode_times=False)
+            if footprint is None:
+                footprint = np.isfinite(a[0])
+        print(f"  ctrl climatology {y}", flush=True)
+    if set(n) != {'tas', 'pr'}:
+        raise ValueError(f"no tas/pr files in {years[0]}-{years[-1]} for the ctrl climatology")
+    r0 = ref['tas']
+    ds = xr.Dataset(coords={'time': r0['time'].values, 'y': r0['y'].values, 'x': r0['x'].values})
+    for var in ('tas', 'pr'):
+        clim = (acc[var] / n[var]).astype('float32')
+        clim[:, ~footprint] = np.nan
+        ds[var] = xr.DataArray(clim, dims=('time', 'y', 'x'), attrs=dict(ref[var][var].attrs))
+        ds[var].attrs['comment'] = f"monthly climatology over {years[0]}-{years[-1]} of {source} ({n[var]} years), repeated for every ctrl year"
+    if 'time_bnds' in r0:
+        ds['time_bnds'] = r0['time_bnds']
+    ds.attrs.update(title=f"ISMIP7 ctrl forcing for {gcm}: {atm} climatology {years[0]}-{years[-1]}",
+                    source=source, years=f"{years[0]}-{years[-1]}")
+    ds.to_netcdf(out_path, encoding={v: dict(zlib=True, complevel=4) for v in ('tas', 'pr')})
+    print(f"wrote {out_path}")
+    return out_path
+
+
 def _ice_means(field12: np.ndarray, ice: np.ndarray) -> dict:
     """Ice-sheet-mean annual / JJA statistics of a (12, ny, nx) field."""
     ok = ice & np.isfinite(field12[0])
@@ -150,13 +196,26 @@ def build_ismip7_forcing(domain_path, gcm: str, scenario: str, atm: str = 'dEBM2
                          ocean: str = 'ocean-1000m', ismip7_dir=None, clim_years=(1986, 2025),
                          pre_years=(1850, 1879), band_km: float = 30.0, fill_km: float = 10.0,
                          skip_climate: bool = False, skip_ocean: bool = False,
-                         output_dir=None, fill_method: str = 'marine') -> Path:
+                         output_dir=None, fill_method: str = 'marine',
+                         ctrl_from: str = 'ssp126', ctrl_years=(2000, 2029)) -> Path:
     domain_path = Path(domain_path)
     ismip7_dir = Path(ismip7_dir) if ismip7_dir else ISMIP7_DIR
     out_dir = Path(output_dir) if output_dir else domain_path / 'model_inputs' / 'ismip7' / f'{gcm}_{scenario}'
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cat = build_catalogue(ismip7_dir, gcm, scenario, atm, ocean)
+    if scenario == 'ctrl':
+        # atmosphere: historical + `ctrl_from` (the climatology's source and the
+        # anomaly reference, as for every other run); ocean: the kit's ctrl tf
+        cat = build_catalogue(ismip7_dir, gcm, ctrl_from, atm, ocean)
+        cat_ctrl = build_catalogue(ismip7_dir, gcm, 'ctrl', atm, ocean)
+        for y, entry in cat_ctrl['years'].items():
+            if entry.get('tf'):
+                cat['years'].setdefault(y, {'tas': None, 'pr': None, 'tf': None})['tf'] = entry['tf']
+        cat['gaps']['tf'] = [y for y in sorted(cat['years']) if not cat['years'][y]['tf']]
+        print(f"ctrl: atmosphere = {atm} climatology {ctrl_years[0]}-{ctrl_years[1]} of historical + {ctrl_from}, "
+              f"ocean = the kit's ctrl {ocean} tf")
+    else:
+        cat = build_catalogue(ismip7_dir, gcm, scenario, atm, ocean)
     years = sorted(cat['years'])
     print(f"{gcm} {scenario}: {years[0]}-{years[-1]} ({len(years)} years); gaps: "
           + ", ".join(f"{v}: {len(g)}" for v, g in cat['gaps'].items()))
@@ -242,6 +301,21 @@ def build_ismip7_forcing(domain_path, gcm: str, scenario: str, atm: str = 'dEBM2
             json.dump(cat_out, f, indent=1)
         print(f"wrote {out_dir / 'catalogue.json'}")
 
+    if scenario == 'ctrl':
+        # after the climatologies (which use the real 2015-2025 of ctrl_from):
+        # every ctrl year reads the repeated climatology instead
+        ctrl_tf = _scan(ismip7_dir, gcm, 'ctrl', ocean, 'tf')      # the kit's own ctrl years (2015-)
+        first_ctrl = min(ctrl_tf) if ctrl_tf else 2015
+        y_ctrl = [y for y in range(ctrl_years[0], ctrl_years[1] + 1)]
+        ctrl_file = str(write_ctrl_climatology(cat['years'], y_ctrl, out_dir / 'ctrl_climatology.nc', gcm, atm,
+                                               f"{gcm} historical + {ctrl_from} {atm}").resolve())
+        for y in years:
+            if y >= first_ctrl:
+                cat['years'][y]['tas'] = ctrl_file
+                cat['years'][y]['pr'] = ctrl_file
+        cat['gaps']['tas'] = cat['gaps']['pr'] = [y for y in years if not cat['years'][y]['tas']]
+        print(f"ctrl years {first_ctrl}-{years[-1]} read {Path(ctrl_file).name}")
+
     tf_path = out_dir / 'thermal_forcing.nc'
     write_catalogue()            # the climate part is usable while the TF record streams
     if not skip_ocean:
@@ -280,8 +354,13 @@ if __name__ == "__main__":
     ap.add_argument("--skip-ocean", action="store_true")
     ap.add_argument("--fill-method", choices=("marine", "nearest"), default="marine")
     ap.add_argument("--output-dir", default=None)
+    ap.add_argument("--ctrl-from", default="ssp126",
+                    help="ctrl only: the scenario whose 2015+ years complete the ctrl climatology and the anomaly reference")
+    ap.add_argument("--ctrl-years", type=int, nargs=2, default=(2000, 2029), metavar=("Y0", "Y1"),
+                    help="ctrl only: the climatology window (the protocol's 2000-2029)")
     a = ap.parse_args()
     build_ismip7_forcing(a.domain_path, a.gcm, a.scenario, atm=a.atm, ocean=a.ocean, ismip7_dir=a.ismip7_dir,
                          clim_years=tuple(a.clim_years), pre_years=tuple(a.pre_years), band_km=a.band_km,
                          fill_km=a.fill_km, skip_climate=a.skip_climate, skip_ocean=a.skip_ocean,
+                         ctrl_from=a.ctrl_from, ctrl_years=tuple(a.ctrl_years),
                          output_dir=a.output_dir, fill_method=a.fill_method)

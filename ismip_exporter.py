@@ -91,7 +91,7 @@ LOSS_SIGN = -1.0                        # see the docstring: verify for ISMIP7
 SLIDING_P = 1.0                         # glide's effective-pressure exponent (grid.py default)
 TIME_UNITS, TIME_CALENDAR = "days since 1850-01-01", "standard"
 
-GROUP, MODEL, REGION = "UM", "GLIDE", "GrIS"        # file-name fields 3 and 4; group id: VERIFY with ISMIP7
+GROUP, MODEL, REGION = "UMT", "GLIDE", "GrIS"        # file-name fields 3 and 4; group id: VERIFY with ISMIP7
 ISM_MEMBER, FORCING_ID = "m001", "f001"
 # nominal year windows of experiments_ismip7.csv (the checker's): historical
 # starts anywhere in 1850-2014 (the run's first yearly frame here), the

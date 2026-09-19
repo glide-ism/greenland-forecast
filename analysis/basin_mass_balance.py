@@ -42,6 +42,8 @@ import pandas as pd
 import xarray as xr
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from ismip_exporter import read_vti  # noqa: E402
 REGIONS = ['NO', 'NE', 'CE', 'SE', 'SW', 'CW', 'NW']
 RHO_I = 917.0
 H_MIN = 2.0          # m; above the thklim floor
@@ -77,23 +79,9 @@ def region_masks(domain_path):
 
 # ------------------------------------------------------------------- frames
 def _vti_arrays(path, names):
-    """Read named Float32 arrays from a glide VTIWriter file (raw appended
-    data, UInt32 length headers, y written south-to-north)."""
-    with open(path, 'rb') as f:
-        head = f.read(1 << 20)
-        i = head.index(b'<AppendedData encoding="raw">')
-        j = head.index(b'_', i) + 1
-        xml = head[:i].decode('utf-8', 'ignore')
-        ext = [int(v) for v in re.search(r'WholeExtent="([^"]+)"', xml).group(1).split()]
-        nx, ny = ext[1] - ext[0] + 1, ext[3] - ext[2] + 1
-        offs = {m.group(1): int(m.group(2)) for m in re.finditer(r'Name="(\w+)"[^>]*format="appended" offset="(\d+)"', xml)}
-        out = {}
-        for n in names:
-            f.seek(j + offs[n])
-            nbytes = int(np.frombuffer(f.read(4), np.uint32)[0])
-            a = np.frombuffer(f.read(nbytes), np.float32).reshape(ny, nx)
-            out[n] = a[::-1].copy()                           # back to the domain's row order
-    return out
+    """Named Float32 arrays of a glide VTIWriter file in the model's row order
+    (ismip_exporter.read_vti: raw or LZ4/zlib compressed appended layout)."""
+    return read_vti(path, names)
 
 
 def frames_vti(run_dir):

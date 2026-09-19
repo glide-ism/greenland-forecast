@@ -261,12 +261,22 @@ class ElevationFeedback:
                 f"relative to {ref}")
 
 
-def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: Optional[ElevationFeedback] = None):
+def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: Optional[ElevationFeedback] = None,
+                     pre_record: str = "climatology"):
     """Replace ctx.compute_smb: the enthalpy SMB model on the fine grid with
     the ISMIP7 monthly forcing of the step (+ the surface-elevation feedback
     when given). Records the forcing's ice-sheet means in ctx.forcing_stats
-    for the scalars file."""
+    for the scalars file. `pre_record`: what steps ending at or before the
+    record's first year see -- "climatology" (tas_pre / pr_pre, the
+    projections) or "standalone" (forward_standalone's own forcing, the
+    CARRA2 climatology + the Vinther anomaly index: the OCX run, whose record
+    starts in 1986)."""
     g, smb_model, temp_dev, domain_mask = ctx.smb_grid, ctx.smb_model, ctx.temp_dev, ctx.domain_mask
+    standalone_smb = ctx.compute_smb                          # forward_standalone's closure (setup)
+    if pre_record not in ("climatology", "standalone"):
+        raise ValueError(f"pre_record {pre_record!r}")
+    nan_stats = {k: float("nan") for k in ("tas_ice_annual", "tas_ice_jja", "pr_ice_annual", "t2m_model_jja",
+                                            "precip_model_annual", "smb_ice_mean", "dS_ice_mean", "dT_feedback_jja")}
     ice = cp.asarray(ctx.gd.rgi_mask.values, dtype=bool)
     tbias, pbias = ctx.tbias, cp.exp(ctx.log_pbias)
     if mode == "anomaly":
@@ -277,6 +287,10 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: O
         raise ValueError(f"CLIMATE_MODE {mode!r}")
 
     def compute_smb(t_prev: float, t_next: float) -> cp.ndarray:
+        if pre_record == "standalone" and t_next <= climate.years[0] + 1e-6:
+            smb = standalone_smb(t_prev, t_next)
+            ctx.forcing_stats = dict(nan_stats, smb_ice_mean=float(smb[ice].mean()))
+            return smb
         tas_np, pr_np = climate.monthly(t_prev, t_next)
         tas, pr = cp.asarray(tas_np), cp.asarray(pr_np)
         if mode == "raw":
@@ -454,7 +468,7 @@ def resume_state(out_dir: Path, ctx: fs.Run, level: int, feedback: Optional["Ele
 
 def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: float,
         dt: float, dt_schedule, mode: str, ocean_cfg, elevation_feedback: bool = ELEVATION_FEEDBACK,
-        continue_run: bool = False) -> None:
+        continue_run: bool = False, pre_record: str = "climatology") -> None:
     q0, h00 = fs.Q0, fs.H00
     out_dir.mkdir(parents=True, exist_ok=True)
     ctx = fs.setup(level=level, out_dir=out_dir,
@@ -469,7 +483,9 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
     if feedback is not None and FEEDBACK_T_REF is not None and not (t_start - 1e-6 <= FEEDBACK_T_REF <= t_end):
         print(f"  WARNING: FEEDBACK_T_REF {FEEDBACK_T_REF:g} lies outside the run {t_start:g}-{t_end:g}: "
               f"the reference is captured at the first step at or after it, or never")
-    ctx.compute_smb = make_compute_smb(ctx, climate, mode, feedback)
+    print(f"before the record ({climate.years[0]}): " + ("forward_standalone's forcing (CARRA2 climatology + Vinther anomaly)"
+          if pre_record == "standalone" else f"the {climate.pre_years[0]}-{climate.pre_years[1]} climatology"))
+    ctx.compute_smb = make_compute_smb(ctx, climate, mode, feedback, pre_record)
     ctx.forcing_stats = {}
     vol_prev = 0.0
     if continue_run:
@@ -480,6 +496,7 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
 
     attrs = dict(level=level, t_start=t_start, t_end=t_end, gcm=climate.gcm, scenario=climate.scenario,
                  climate_mode=mode, apply_biases=int(APPLY_BIASES), checkpoint=str(fs.CHECKPOINT),
+                 pre_record=pre_record,
                  elevation_feedback=(feedback.describe() if feedback is not None else "off"),
                  crs_wkt=ctx.crs.to_wkt(), climate=climate.describe(),
                  ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
@@ -559,6 +576,9 @@ def main() -> None:
     ap.add_argument("--mode", default=CLIMATE_MODE, choices=("raw", "anomaly"))
     ap.add_argument("--out-dir", default=OUT_DIR)
     ap.add_argument("--forcing-dir", default=FORCING_DIR)
+    ap.add_argument("--pre-record", default="climatology", choices=("climatology", "standalone"),
+                    help="forcing before the record's first year: the pre-record climatology (projections) or "
+                         "forward_standalone's CARRA2 climatology + Vinther anomaly (the OCX run)")
     ap.add_argument("--no-elevation-feedback", action="store_true",
                     help="keep the forcing temperature on the observed DEM (the pre-2026-09-17 behaviour)")
     ap.add_argument("--continue", dest="continue_run", action="store_true",
@@ -575,7 +595,8 @@ def main() -> None:
     ocean_cfg = config.ocean_forcing if OCEAN is None else OCEAN
     run(a.level, out_dir, forcing_dir, float(a.t_start), float(a.t_end), float(DT), DT_SCHEDULE,
         a.mode, ocean_cfg,
-        elevation_feedback=ELEVATION_FEEDBACK and not a.no_elevation_feedback, continue_run=a.continue_run)
+        elevation_feedback=ELEVATION_FEEDBACK and not a.no_elevation_feedback, continue_run=a.continue_run,
+        pre_record=a.pre_record)
 
 
 if __name__ == "__main__":

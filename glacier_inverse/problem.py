@@ -237,6 +237,24 @@ class GlacierProblem:
                 warnings.warn(f"ocean_forcing enabled but {tf_path} is missing: "
                               f"calving margins stay at calving_q / calving_h0")
 
+        # Optional year-by-year forcing over a reanalysis record (see
+        # yearly_climate.py): per-year t2m anomalies / precip ratios on the
+        # model's climatology, the same crop, never on the tape.
+        self.yearly_climate = None
+        if cfg.yearly_climate_filename is not None:
+            if cfg.base_anomaly_year is not None:
+                raise ValueError("yearly_climate_filename requires base_anomaly_year=None: "
+                                 "the yearly fields are departures from the climatology window")
+            yc_path = inputs_dir / cfg.yearly_climate_filename
+            if yc_path.exists():
+                from .yearly_climate import YearlyClimate
+                self.yearly_climate = YearlyClimate.from_file(
+                    yc_path, 2 ** cfg.n_levels, cache=cfg.yearly_climate_cache)
+                print(self.yearly_climate.describe())
+            else:
+                warnings.warn(f"yearly_climate_filename set but {yc_path} is missing: "
+                              f"every year uses the climatology + index anomaly")
+
         ny, nx = self.gridded_data.sizes["y"], self.gridded_data.sizes["x"]
         dx = (self.gridded_data.x[1] - self.gridded_data.x[0]).item()
         x0 = self.gridded_data.x[0].item()
@@ -1069,6 +1087,7 @@ class GlacierProblem:
             time_writer=time_writer,
             ocean_forcing=self.ocean_forcing,
             dt_schedule=cfg.dt_schedule,
+            yearly_climate=self.yearly_climate,
         )
 
     def simulate(

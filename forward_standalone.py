@@ -227,6 +227,19 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
     year_max = max(t_anom)
     base_anomaly = (0.0 if config.base_anomaly_year is None
                     else t_anom[int(config.base_anomaly_year)])
+    # The inverse's year-by-year forcing over the reanalysis record
+    # (config.yearly_climate_filename; None or a missing file = the index
+    # everywhere). Same loader as the inverse; read from the file per call
+    # (no host cache: the driver evaluates each year once).
+    yearly = None
+    if config.yearly_climate_filename is not None:
+        yc_path = Path(config.base_dir) / "model_inputs" / config.yearly_climate_filename
+        if yc_path.exists():
+            from glacier_inverse.yearly_climate import YearlyClimate
+            yearly = YearlyClimate.from_file(yc_path, 2 ** config.n_levels, cache="none")
+            print(yearly.describe())
+        else:
+            print(f"yearly climate {yc_path} missing: climatology + index anomaly everywhere")
 
     ny, nx = gd.sizes["y"], gd.sizes["x"]
     dx = float(gd.x[1] - gd.x[0])
@@ -310,15 +323,35 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
                                         np.random.default_rng(config.enthalpy_seed))
     domain_mask = cp.asarray(gd.domain_mask.values, dtype=bool)
 
-    def compute_smb(t_prev: float, t_next: float) -> cp.ndarray:
-        """Annual-mean SMB on the fine grid for the step (t_prev, t_next]:
-        t2m shifted by the interval-mean anomaly (config.anomaly_integration
-        'mean_anomaly') plus the calibrated bias; -10 m/yr outside the domain."""
-        a = sum(w * t_anom[min(y, year_max)] for y, w in year_overlap_weights(t_prev, t_next))
-        shift = config.alpha_t2m * a - base_anomaly + tbias
+    def smb_index(shift) -> cp.ndarray:
         g.temperature.t2m.set(t2m + shift)
+        g.precipitation.precip.set(precip)
         smb_model.forward(temp_deviations=temp_dev)
-        smb = g.state.smb.data.mean(axis=0)
+        return g.state.smb.data.mean(axis=0)
+
+    def smb_year(year: int) -> cp.ndarray:
+        # the reanalysis year + the calibrated biases (forward.YearField)
+        g.temperature.t2m.set(t2m + cp.asarray(yearly.t2m_anomaly(year)) + tbias)
+        g.precipitation.precip.set(precip * cp.asarray(yearly.precip_ratio(year)))
+        smb_model.forward(temp_deviations=temp_dev)
+        return g.state.smb.data.mean(axis=0)
+
+    def compute_smb(t_prev: float, t_next: float) -> cp.ndarray:
+        """Annual-mean SMB on the fine grid for the step (t_prev, t_next],
+        as the inverse builds it (forward.simulate, 'mean_anomaly'): one
+        evaluation per reanalysis year the step overlaps (the year's fields
+        + biases) and one at the interval-mean index anomaly over the
+        remaining years; -10 m/yr outside the domain."""
+        weights = year_overlap_weights(t_prev, t_next)
+        on_record = [(y, w) for y, w in weights if yearly is not None and yearly.has(y)]
+        index = [(y, w) for y, w in weights if not (yearly is not None and yearly.has(y))]
+        smb = cp.zeros_like(t2m[0])
+        for y, w in on_record:
+            smb += w * smb_year(y)
+        if index:
+            w_index = sum(w for _, w in index)
+            a = sum(w * t_anom[min(y, year_max)] for y, w in index) / w_index
+            smb += w_index * smb_index(config.alpha_t2m * a - base_anomaly + tbias)
         smb[~domain_mask] = -10.0
         return smb
 

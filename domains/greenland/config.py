@@ -38,7 +38,7 @@ _HERE = Path(__file__).parent
 CONFIG = GlacierConfig(
     base_dir=str(_HERE),
     vti_base_name="greenland",
-    results_subdir="inverse",
+    results_subdir="inverse_v2",
     smb_model="enthalpy",
     anomaly_integration="mean_anomaly",
     stress_scheme="molho",
@@ -62,6 +62,15 @@ CONFIG = GlacierConfig(
     # (analysis/arctic_amplification.py --regressor vinther).
     base_anomaly_year=None,
     alpha_t2m=0.6,
+    # 2026-09-18: the years CARRA2 covers (1986-2025) are forced by the
+    # reanalysis year itself (t2m anomaly + precip ratio on the climatology,
+    # preprocessing/make_climate_yearly.py); the Vinther index only acts
+    # before 1986. Both dh/dt windows lie inside the record, so the
+    # calibration sees the same weather as the OCX hindcast. Set to None
+    # for the climatology + index forcing everywhere (the pre-2026-09-18
+    # inversions). The fields never sit on the tape (yearly_climate.py).
+    yearly_climate_filename="gridded_climate_yearly.nc",
+    yearly_climate_cache="ram",
 
     n_levels=6,
     max_level=2,
@@ -142,7 +151,7 @@ CONFIG = GlacierConfig(
     q_lw0=-35.0,
 
     # ---- priors (l in metres; 1 km cells)
-    bed_prior=PriorHyperparams(sigma=300.0, l=4000.0, nu=1),
+    bed_prior=PriorHyperparams(sigma=500.0, l=4000.0, nu=1),
     mean_prior=PriorHyperparams(sigma=1000.0, l=30000.0, nu=1),
     log_beta_prior=PriorHyperparams(sigma=1.0 / 3.0, l=8000.0, nu=1),
     pbias_prior=PriorHyperparams(sigma=0.1, l=50000.0, nu=1),
@@ -154,25 +163,35 @@ CONFIG = GlacierConfig(
     influence_transfer="log",
 
     observations=(
-        SurfaceSpec(noise=MaternNoise(sigma=15.0, l=4000.0, nu=0.5, nugget=10.0),
+        SurfaceSpec(noise=MaternNoise(sigma=30.0, l=4000.0, nu=0.5, nugget=10.0),
                     weight=1.0, nu=3),
-        VelocitySpec(noise=MaternNoise(sigma=50.0, l=10000.0, nugget=50.0), weight=1.0,
+        VelocitySpec(noise=MaternNoise(sigma=100.0, l=10000.0, nugget=100.0), weight=1.0,
                      surge_biased=False, mask_unobserved=True, nu=3),
         ExtentSpec(weight=1.0, s_H=10.0, sigma_p=0.3,
                    logit_error=MaternNoise(sigma=0.3, l=5000.0),
                    nuisance_inner_steps=2, eps_max=1.0),
         BedSpec(weight=0.0),     # data lives in the conditioned prior map
-        SnowlineSpec(weight=1.0, s_smb=0.5, sigma_p=0.3,
-                     logit_error=MaternNoise(sigma=0.3, l=10000.0),
+        # 2000-2020 end-of-summer snowlines (make_snowline.py): the label is
+        # the fraction of seasons with snow, so the model probability is the
+        # mean over those 21 years of sigmoid(SMB_year / s_smb) — each year
+        # its own step under the yearly CARRA2 forcing (window="file" =
+        # the product's time_start..time_end). two_sided: the product
+        # classifies both sides on the main sheet, and the one-sided score
+        # (penalize missing snow only) overshot — inverse_v2 put snow below
+        # the snowline for free (bare ice 130 k vs 187 k km2, SMB 555 Gt/yr,
+        # pbias +8 %; 2026-09-19).
+        SnowlineSpec(weight=1.0, s_smb=0.5, sigma_p=0.3, window="file",
+                     two_sided=True,
+                     logit_error=MaternNoise(sigma=0.5, l=10000.0),
                      nuisance_inner_steps=2, eps_max=1.0),
-        DhdtSpec(noise=MaternNoise(sigma=1.0, l=10000.0, nu=0.5, nugget=0.5),
+        DhdtSpec(noise=MaternNoise(sigma=0.5, l=10000.0, nu=0.5, nugget=0.5),
                  weight=1.0),               # ATL15 2019-2026 (gridded_dhdt.nc)
         # MEaSUREs / ITS_LIVE G1920V01 dh trend over 1992-2019: the earlier,
         # non-overlapping window that spans the onset of the tidewater
         # retreats (make_dhdt.py --source itslive_dh --t0 1992 --t1 2019
         # --name measures). Skipped when the file is absent.
         DhdtSpec(filename="gridded_dhdt_measures.nc", name="dhdt_measures",
-                 noise=MaternNoise(sigma=1.0, l=10000.0, nu=0.5, nugget=0.5),
+                 noise=MaternNoise(sigma=0.5, l=10000.0, nu=0.5, nugget=0.5),
                  weight=1.0),
     ),
     loss_scale=1e-3,
