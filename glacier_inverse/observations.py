@@ -1057,7 +1057,8 @@ class SnowlineObservation(Observation):
                  huber: Optional[float] = None,
                  labels: Optional[Sequence[torch.Tensor]] = None,
                  hinge_window: str = "per_season",
-                 margin_prob: float = 0.05):
+                 margin_prob: float = 0.05,
+                 prob_scale: Optional[float] = None):
         super().__init__(weight=weight)
         if loss not in ("brier", "hinge"):
             raise ValueError(f"SnowlineObservation loss={loss!r}: expected 'brier' or 'hinge'")
@@ -1075,6 +1076,15 @@ class SnowlineObservation(Observation):
                              "snow-fraction noise std) as its scale")
         self.hinge_window = hinge_window
         self.margin_prob = float(margin_prob)
+        # Width of the smooth indicator in "mean_prob". It is a NUMERICAL
+        # smoothing of 1[b > 0], not an error std, and the two want opposite
+        # values: at s_smb = 0.35 the interior reports P(snow) = 0.69 against
+        # a label of 0.996 while the model's own hard indicator gives 0.990,
+        # so the residual is manufactured by the smoothing and the term
+        # chases it (61 % of the gradient above 2000 m, precipitation pulled
+        # up - the v3 Brier pathology). It must be small against the
+        # season-to-season SMB scatter: 0.02 gives P = 0.987 and 1.3 %.
+        self.prob_scale = float(s_smb if prob_scale is None else prob_scale)
         self.logit_nuisance = logit_nuisance
         self.sigma_p = sigma_p
         self.snow_label = snow_label
@@ -1179,9 +1189,9 @@ class SnowlineObservation(Observation):
         level = states[0].level
         omega, composite = self._target_at(level)
         if self.hinge_window == "mean_prob":
-            p = torch.sigmoid(states[0].smb_coarse / self.s_smb)
+            p = torch.sigmoid(states[0].smb_coarse / self.prob_scale)
             for st in states[1:]:
-                p = p + torch.sigmoid(st.smb_coarse / self.s_smb)
+                p = p + torch.sigmoid(st.smb_coarse / self.prob_scale)
             p = p / float(len(states))
             total = self._rho(torch.relu((p - composite).abs() - self.margin_prob))
             c = weight * 4.0 ** level / self.sigma_p ** 2
@@ -1773,6 +1783,11 @@ class SnowlineSpec:
     # labels are loaded only for "per_season".
     hinge_window: str = "per_season"
     margin_prob: float = 0.05
+    # "mean_prob" only: width of the smooth indicator, a numerical smoothing
+    # of 1[b > 0] and NOT an error std. None = s_smb, which is far too wide
+    # and manufactures an interior residual the term then chases; ~0.02 m/yr
+    # reproduces the hard indicator. See SnowlineObservation.
+    prob_scale: Optional[float] = None
 
     def build(self, ctx: ObservationBuildContext) -> Optional[SnowlineObservation]:
         sd = ctx.snowline_data
@@ -1828,7 +1843,7 @@ class SnowlineSpec:
                             if self.logit_error is not None else None),
             sigma_p=self.sigma_p, loss=self.loss, margin=self.margin,
             huber=self.huber, labels=labels, hinge_window=self.hinge_window,
-            margin_prob=self.margin_prob)
+            margin_prob=self.margin_prob, prob_scale=self.prob_scale)
 
 
 @dataclass(frozen=True)
