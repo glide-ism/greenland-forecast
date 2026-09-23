@@ -125,9 +125,15 @@ def frames_series_nc(run_dir):
     nc.close()
 
 
-def model_series(run_dir, masks, dx):
+def model_series(run_dir, masks, dx, prefer='auto'):
+    """`prefer`: 'auto' takes the finest source available (series.nc, then
+    yearly VTI, then snapshots); 'snapshots' forces snapshots.nc, which for a
+    projection is every SNAPSHOT_EVERY years instead of every step -- 220
+    reads instead of 522, and plenty for a cumulative curve."""
     run_dir = Path(run_dir)
-    if (run_dir / 'series.nc').exists():
+    if prefer == 'snapshots' and (run_dir / 'snapshots.nc').exists():
+        gen = frames_snapshots(run_dir)
+    elif (run_dir / 'series.nc').exists():
         gen = frames_series_nc(run_dir)
     elif (run_dir / 'snapshots.nc').exists() and not (run_dir / 'vti').exists():
         gen = frames_snapshots(run_dir)
@@ -174,7 +180,23 @@ def mankoff_annual(path):
 
 
 # ------------------------------------------------------------------- plots
-def plot(runs, obs, out_dir, ref_year, t_range):
+SCEN_COLOR = {'ssp126': 'tab:blue', 'ssp370': 'tab:orange', 'ssp585': 'tab:red'}
+# reserved for runs without a scenario (the standalone / OCX reference), kept
+# clear of SCEN_COLOR so the reference never collides with a projection
+PLAIN_COLOR = ('tab:green', 'tab:purple', 'tab:brown', 'tab:pink', 'tab:olive')
+
+
+def style_for(name, i, cycle):
+    """Colour by scenario and dash by GCM so six projections stay readable;
+    a run with no scenario in its name is the reference and gets its own
+    colour and a heavier line."""
+    for k, c in SCEN_COLOR.items():
+        if k in name:
+            return c, ('--' if 'MRI' in name.upper() else '-'), 1.4
+    return PLAIN_COLOR[i % len(PLAIN_COLOR)], '-', 2.6
+
+
+def plot(runs, obs, out_dir, ref_year, t_range, ref_run=None):
     panels = REGIONS + ['GrIS']
     colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     # rates
@@ -185,10 +207,11 @@ def plot(runs, obs, out_dir, ref_year, t_range):
         ax.plot(yo, obs[f'MB_{r}'], 'k-', lw=1.5, label='Mankoff MB')
         ax.plot(yo, obs[f'SMB_{r}'], 'k:', lw=0.8, alpha=.6, label='Mankoff SMB')
         ax.plot(yo, -obs[f'DB_{r}'], 'k--', lw=0.8, alpha=.6, label='Mankoff -(D+BMB)')
-        for (name, df), c in zip(runs.items(), colors):
+        for i, (name, df) in enumerate(runs.items()):
+            c, ls, lw = style_for(name, i, colors)
             df = df[(df.index >= t_range[0] - 1) & (df.index <= t_range[1] + 10)]
             tm = df.index.to_series().rolling(2).mean()            # mid-interval
-            ax.plot(tm, df[f'MB_{r}'], '-', color=c, lw=1.5, label=f'{name} MB')
+            ax.plot(tm, df[f'MB_{r}'], ls, color=c, lw=lw, label=f'{name} MB')
             ax.plot(df.index, df[f'SMB_{r}'], ':', color=c, lw=0.8, alpha=.6, label=f'{name} SMB')
             ax.plot(tm, df[f'MB_{r}'] - df[f'SMB_{r}'].rolling(2).mean(), '--', color=c, lw=0.8, alpha=.6, label=f'{name} -D (MB-SMB)')
         ax.axhline(0, color='grey', lw=.5); ax.set_title(r); ax.grid(alpha=.3); ax.set_xlim(*t_range)
@@ -201,28 +224,38 @@ def plot(runs, obs, out_dir, ref_year, t_range):
     fig.suptitle('Annual mass balance by Mouginot & Rignot region: Mankoff et al. (black) vs model')
     fig.tight_layout(); fig.savefig(out_dir / 'basin_mb_rates.png', dpi=130); plt.close(fig)
 
-    # cumulative since ref_year
+    # cumulative. With `ref_run` every experiment is offset by THAT run's mass
+    # at ref_year, so the curves keep their mutual bias instead of each being
+    # forced through zero; Mankoff has only rates, so its cumulative is
+    # anchored at zero there, i.e. on the reference run.
     fig, axs = plt.subplots(2, 4, figsize=(17, 7.5), sharex=True)
     for ax, r in zip(axs.ravel(), panels):
         o = obs[obs.index >= ref_year]
         cum = o[f'MB_{r}'].cumsum(); err = o[f'MBerr_{r}'].cumsum()
         yo = o.index + 1.0
         ax.fill_between(np.r_[ref_year, yo], np.r_[0, cum - err], np.r_[0, cum + err], color='k', alpha=.15, lw=0)
-        ax.plot(np.r_[ref_year, yo], np.r_[0, cum], 'k-', lw=1.5, label='Mankoff')
-        for (name, df), c in zip(runs.items(), colors):
-            d = df[(df.index >= ref_year - 1e-6) & (df.index <= t_range[1])]
+        ax.plot(np.r_[ref_year, yo], np.r_[0, cum], 'k-', lw=2.0, label='Mankoff', zorder=5)
+        m_ref = (np.interp(ref_year, runs[ref_run].index, runs[ref_run][f'M_{r}'])
+                 if ref_run is not None else None)
+        for i, (name, df) in enumerate(runs.items()):
+            c, ls, lw = style_for(name, i, colors)
+            d = df[(df.index >= t_range[0] - 1e-6) & (df.index <= t_range[1])]
             if len(d) == 0:
                 continue
-            m0 = np.interp(ref_year, df.index, df[f'M_{r}'])
-            ax.plot(d.index, d[f'M_{r}'] - m0, '-', color=c, lw=1.5, label=name)
-        ax.axhline(0, color='grey', lw=.5); ax.set_title(r); ax.grid(alpha=.3); ax.set_xlim(ref_year, t_range[1])
+            m0 = m_ref if m_ref is not None else np.interp(ref_year, df.index, df[f'M_{r}'])
+            ax.plot(d.index, d[f'M_{r}'] - m0, ls, color=c, lw=lw, label=name)
+        ax.axvline(ref_year, color='grey', lw=.5, ls=':')
+        ax.axhline(0, color='grey', lw=.5); ax.set_title(r); ax.grid(alpha=.3)
+        ax.set_xlim(t_range[0], t_range[1])
         if r == 'GrIS':
-            ax.legend(fontsize=8)
+            ax.legend(fontsize=7, ncol=2)
     for ax in axs[1]:
         ax.set_xlabel('year')
+    anchor = f'{ref_run} at {ref_year:g}' if ref_run is not None else f'each run at {ref_year:g}'
     for ax in axs[:, 0]:
-        ax.set_ylabel(f'mass change since {ref_year:g} (Gt)')
-    fig.suptitle(f'Cumulative mass change since {ref_year:g} by region')
+        ax.set_ylabel(f'mass relative to\n{anchor} (Gt)')
+    fig.suptitle(f'Cumulative mass change by region, all experiments relative to {anchor} '
+                 f'(Mankoff anchored there too)')
     fig.tight_layout(); fig.savefig(out_dir / 'basin_mb_cumulative.png', dpi=130); plt.close(fig)
 
 
@@ -236,7 +269,7 @@ def main(args):
     for spec in args.run:
         name, path = spec.split('=', 1)
         print(f"reading {name} from {path}")
-        runs[name] = model_series(path, masks, dx)
+        runs[name] = model_series(path, masks, dx, prefer=args.prefer)
         runs[name].to_csv(out_dir / f'model_{name}.csv')
     # summary over the overlap
     lo, hi = max(1986, args.t_range[0]), args.t_range[1]
@@ -255,7 +288,9 @@ def main(args):
     print(f"\nmean over {lo:g}-{hi:g} (Gt/yr):")
     print(S.round(1).to_string(index=False))
     S.to_csv(out_dir / 'summary.csv', index=False)
-    plot(runs, obs, out_dir, args.ref_year, args.t_range)
+    if args.ref_run is not None and args.ref_run not in runs:
+        raise SystemExit(f'--ref-run {args.ref_run!r} is not one of {list(runs)}')
+    plot(runs, obs, out_dir, args.ref_year, args.t_range, ref_run=args.ref_run)
     print(f"wrote {out_dir}")
 
 
@@ -267,6 +302,13 @@ if __name__ == '__main__':
     ap.add_argument('--ref-year', type=float, default=2000.0)
     ap.add_argument('--t-range', type=float, nargs=2, default=(1985, 2027))
     ap.add_argument('--out-dir', default=str(HERE / 'output' / 'basin_mb'))
+    ap.add_argument('--ref-run', default=None,
+                    help='name of the run every curve is offset by (its mass at --ref-year), so the '
+                         'cumulative panels show the experiments\' mutual bias; default: each run '
+                         'referenced to itself')
+    ap.add_argument('--prefer', default='auto', choices=('auto', 'snapshots'),
+                    help="'snapshots' forces snapshots.nc over the yearly VTI series (much faster "
+                         "for projections, and enough for cumulative curves)")
     a = ap.parse_args()
     if not a.run:
         a.run = ['reference=domains/greenland/inverse_vinther_bedgrad/forward_standalone']

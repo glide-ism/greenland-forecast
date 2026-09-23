@@ -217,7 +217,7 @@ CONFIG = GlacierConfig(
     forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,
                                 absolute_tolerance=10.0, report_norms=False,
-                                omega=0.5, momentum_damping=1.0, step_tolerance=1e-6),
+                                omega=0.5, momentum_damping=0.1, step_tolerance=1e-6),
     adjoint_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,
                                 absolute_tolerance=1e-5, report_norms=False,
