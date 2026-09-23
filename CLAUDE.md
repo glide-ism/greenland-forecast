@@ -816,6 +816,26 @@ driver reads them from the kit per step), `climate.nc` (monthly
 climatologies: `tas_clim`/`pr_clim` over the CARRA2 window 1986-2025 for
 the anomaly mode, `tas_pre`/`pr_pre` over 1850-1879 for the constant
 pre-record forcing, ice-mean bias attrs vs CARRA2) and `thermal_forcing.nc`
+**ANOMALY REFERENCE, fixed 2026-09-23 (`--clim-scenario`, default
+`CLIM_REF_SCENARIO` = ssp126 for ssp runs, self otherwise).** `clim_years`
+1986-2025 STRADDLES the historical/scenario splice at 2014, so the tail used
+to come from whichever scenario was being built -- and the ssps are separate
+realizations, differing there by internal variability, not only by forcing.
+CESM2-WACCM `tas_clim` ssp126 vs ssp370 differed by -0.137 K in the ice mean
+and up to 1 K locally. In anomaly mode
+`t2m = t2m_clim + (tas - tas_clim) + tbias`, so a colder reference WARMS the
+forcing for the same historical `tas`, and the three scenarios of a GCM
+diverged BEFORE 2015 -- ~800 Gt by 1985 in the v7 projections, visible as
+the pre-2015 spread in `analysis/output/basin_mb_projections/`. The catalogue
+files and the TF are identical over 1850-2014 (checked: max |dTF| 0.0000 K),
+so the reference was the only cause. The tail is now taken from ONE scenario
+for every scenario of a GCM. Shrinking the window to end at 2014 instead
+would NOT work: it has to stay aligned with the model's own CARRA2
+climatology or the anomaly picks up the warming between the two windows.
+`climate.nc` records `clim_scenario`; `--clim-scenario self` restores the old
+behaviour. Products rebuilt 2026-09-23 for CESM2-WACCM / MRI-ESM2-0 ssp370
+and ssp585 (ssp126 IS the reference, so it was already correct and its file
+is unchanged). Projections run before that date carry the old reference.
 (annual mean/max TF for all 451 years in `make_thermal_forcing.py`'s layout,
 streamed year by year and blanked > 30 km from the ice; `OceanForcing.from_file(lazy=True)`
 reads it per year). The run is seamless 1800-2300: 5-yr steps on the

@@ -21,7 +21,13 @@ without touching CARRA2 / Vinther / EN4:
   climate.nc           monthly climatologies on the domain grid (degC, m ice/yr):
                          tas_clim / pr_clim   over --clim-years (default the
                                               CARRA2 climatology window 1986-2025;
-                                              the anomaly mode's reference)
+                                              the anomaly mode's reference). That
+                                              window straddles the 2015 splice, so
+                                              its tail is taken from ONE scenario
+                                              (--clim-scenario) and shared by every
+                                              scenario of a GCM; otherwise they carry
+                                              different references and diverge before
+                                              2015.
                          tas_pre  / pr_pre    over --pre-years (default 1850-1879;
                                               the constant forcing before the record)
                          fill_dist            km to the nearest native (finite) cell
@@ -43,6 +49,7 @@ import glob
 import json
 import re
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import xarray as xr
@@ -55,6 +62,11 @@ ISMIP7_DIR = Path('../ismip7_data')
 SECONDS_PER_YEAR = 31536000.0       # glare.enthalpy.SECONDS_PER_YEAR
 ICE_DENSITY = 917.0
 FILE_PATTERN = '{var}_GrIS_{gcm}_{scenario}_{product}_*_{year}.nc'
+# Scenario supplying the post-2014 tail of the anomaly reference for every ssp
+# run of a GCM, so they share it exactly (see build_ismip7_forcing). Any fixed
+# choice works -- what matters is that it is the same for all -- and ssp126 is
+# the lowest-forcing one, i.e. the closest continuation of the historical.
+CLIM_REF_SCENARIO = 'ssp126'
 
 
 def _scan(ismip7_dir: Path, gcm: str, scenario: str, product: str, var: str) -> dict:
@@ -197,7 +209,8 @@ def build_ismip7_forcing(domain_path, gcm: str, scenario: str, atm: str = 'dEBM2
                          pre_years=(1850, 1879), band_km: float = 30.0, fill_km: float = 10.0,
                          skip_climate: bool = False, skip_ocean: bool = False,
                          output_dir=None, fill_method: str = 'marine',
-                         ctrl_from: str = 'ssp126', ctrl_years=(2000, 2029)) -> Path:
+                         ctrl_from: str = 'ssp126', ctrl_years=(2000, 2029),
+                         clim_scenario: Optional[str] = None) -> Path:
     domain_path = Path(domain_path)
     ismip7_dir = Path(ismip7_dir) if ismip7_dir else ISMIP7_DIR
     out_dir = Path(output_dir) if output_dir else domain_path / 'model_inputs' / 'ismip7' / f'{gcm}_{scenario}'
@@ -239,9 +252,30 @@ def build_ismip7_forcing(domain_path, gcm: str, scenario: str, atm: str = 'dEBM2
     if not skip_climate:
         y_clim = [y for y in range(clim_years[0], clim_years[1] + 1)]
         y_pre = [y for y in range(pre_years[0], pre_years[1] + 1)]
-        print(f"climatology over {clim_years[0]}-{clim_years[1]}")
-        tas_clim = monthly_climatology(cat['years'], 'tas', y_clim, template, to_degc)
-        pr_clim = monthly_climatology(cat['years'], 'pr', y_clim, template, to_ice)
+        # THE ANOMALY REFERENCE MUST NOT DEPEND ON WHICH SCENARIO IS BUILT.
+        # clim_years (1986-2025) straddles the historical/scenario splice at
+        # 2014, so its tail otherwise comes from THIS scenario's files -- and
+        # the ssps are separate realizations, so they differ there by internal
+        # variability, not only by forcing. Measured on CESM2-WACCM: tas_clim
+        # ssp126 vs ssp370 differ by -0.137 K in the ice mean and up to 1 K
+        # locally. In anomaly mode t2m = t2m_clim + (tas - tas_clim) + tbias,
+        # so a colder reference warms the forcing for the SAME historical tas,
+        # and the three scenarios then diverge before 2015, ~800 Gt by 1985.
+        # Taking the tail from ONE scenario for all of them removes that.
+        # Shrinking the window to end in 2014 instead would NOT work: it has
+        # to stay aligned with the model's own CARRA2 climatology (1986-2025)
+        # or the anomaly acquires the warming between the two windows.
+        ref_scen = clim_scenario
+        if ref_scen is None:
+            ref_scen = CLIM_REF_SCENARIO if scenario.startswith('ssp') else scenario
+        clim_cat = cat['years']
+        if ref_scen not in (scenario, 'self'):
+            clim_cat = build_catalogue(ismip7_dir, gcm, ref_scen, atm, ocean)['years']
+        print(f"climatology over {clim_years[0]}-{clim_years[1]}"
+              + (f" (anomaly reference from {ref_scen}, shared by every scenario of {gcm})"
+                 if clim_cat is not cat['years'] else ""))
+        tas_clim = monthly_climatology(clim_cat, 'tas', y_clim, template, to_degc)
+        pr_clim = monthly_climatology(clim_cat, 'pr', y_clim, template, to_ice)
         print(f"pre-record climatology over {pre_years[0]}-{pre_years[1]}")
         tas_pre = monthly_climatology(cat['years'], 'tas', y_pre, template, to_degc)
         pr_pre = monthly_climatology(cat['years'], 'pr', y_pre, template, to_ice)
@@ -265,7 +299,8 @@ def build_ismip7_forcing(domain_path, gcm: str, scenario: str, atm: str = 'dEBM2
         ds['fill_dist'] = xr.DataArray(fill_dist, dims=('y', 'x'), attrs=dict(
             units='km', long_name='Distance to the nearest cell with a native ISMIP7 atmospheric value'))
         ds.attrs.update(gcm=gcm, scenario=scenario, atm_product=atm, grid_mapping=mapping,
-                        clim_years=f"{clim_years[0]}-{clim_years[1]}", pre_years=f"{pre_years[0]}-{pre_years[1]}",
+                        clim_years=f"{clim_years[0]}-{clim_years[1]}", clim_scenario=ref_scen,
+                        pre_years=f"{pre_years[0]}-{pre_years[1]}",
                         ice_cells_without_native_value=int((ice & ~finite).sum()),
                         ice_cells=int(ice.sum()))
         # the bias to look at: ice-sheet means against the CARRA2 climatology
@@ -346,6 +381,11 @@ if __name__ == "__main__":
     ap.add_argument("--ismip7-dir", default=None)
     ap.add_argument("--clim-years", type=int, nargs=2, default=(1986, 2025), metavar=("Y0", "Y1"),
                     help="reference window of tas_clim / pr_clim (default: the CARRA2 climatology window)")
+    ap.add_argument("--clim-scenario", default=None,
+                    help="scenario supplying the part of --clim-years past the historical, so every "
+                         f"scenario of a GCM shares one anomaly reference (default: {CLIM_REF_SCENARIO} "
+                         "for ssp runs, self otherwise; 'self' restores the pre-2026-09-23 behaviour, "
+                         "which made the scenarios diverge before 2015)")
     ap.add_argument("--pre-years", type=int, nargs=2, default=(1850, 1879), metavar=("Y0", "Y1"),
                     help="window of the constant pre-record forcing")
     ap.add_argument("--band-km", type=float, default=30.0, help="keep TF within this distance of the ice")
@@ -360,6 +400,7 @@ if __name__ == "__main__":
                     help="ctrl only: the climatology window (the protocol's 2000-2029)")
     a = ap.parse_args()
     build_ismip7_forcing(a.domain_path, a.gcm, a.scenario, atm=a.atm, ocean=a.ocean, ismip7_dir=a.ismip7_dir,
+                         clim_scenario=a.clim_scenario,
                          clim_years=tuple(a.clim_years), pre_years=tuple(a.pre_years), band_km=a.band_km,
                          fill_km=a.fill_km, skip_climate=a.skip_climate, skip_ocean=a.skip_ocean,
                          ctrl_from=a.ctrl_from, ctrl_years=tuple(a.ctrl_years),
