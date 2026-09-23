@@ -14,15 +14,24 @@ as prepared by preprocessing/make_ismip7_forcing.py in
 model_inputs/ismip7/<gcm>_<scenario>/ (historical 1850-2014 spliced with the
 scenario 2015-2300; the yearly tas / pr files are read from the kit per step
 through catalogue.json, the climatologies and the annual TF statistics from
-climate.nc / thermal_forcing.nc). One seamless run from T_START (1800) to
-T_END (2301: the ISMIP7 record ends with nominal year 2300, i.e. the step
-(2300, 2301]; the kit's last year is held for it):
+climate.nc / thermal_forcing.nc). One seamless run from T_START to T_END
+(2301: the ISMIP7 record ends with nominal year 2300, i.e. the step
+(2300, 2301]; the kit's last year is held for it). T_START and DT default to
+the INVERSE's own spin-up (config.t_start / config.dt), so the relaxation
+handed to the record is the calibrated one:
 
-  * before the record (1800-1850) the forcing is the constant pre-record
-    climatology (tas_pre / pr_pre: 1850-1879 monthly means; dTF = 0), in
-    DT-year steps; from the first record year on, annual steps carry each
-    year's monthly fields (a step spanning several years takes their
-    overlap-weighted mean); after the last year the last year holds;
+  * before the record (which starts 1850) the forcing is chosen by
+    `--pre-record`. "standalone" delegates to forward_standalone's
+    compute_smb, i.e. the inverse's own forcing -- the deep temperature
+    index, the index precipitation multiplier and the interannual
+    quadrature -- and is what a full spin-up needs. "climatology" holds the
+    constant pre-record GCM climatology (tas_pre / pr_pre: 1850-1879
+    monthly means) and is refused for spans over 200 yr, since over a
+    millennial spin-up it is exactly the flat-hold bias the deep forcing
+    work removed. dTF = 0 before the TF record either way. From the first
+    record year on, annual steps carry each year's monthly fields (a step
+    spanning several years takes their overlap-weighted mean); after the
+    last year the last year holds;
   * CLIMATE_MODE "raw": the SMB model sees the ISMIP7 monthly fields as they
     are (2 m temperature from the dEBM2 downscaling, degC; precipitation as
     m ice / yr), nearest-filled onto the 12% of ice cells outside the
@@ -86,8 +95,12 @@ from glacier_inverse.scheduling import build_step_sequence
 # ----------------------------------------------------------------- settings
 GCM, SCENARIO = "CESM2-WACCM", "ssp126"
 LEVEL = 0                         # run level (0 = 1 km)
-T_START, T_END = 1800.0, 2301.0   # ISMIP's nominal year 2300 is the step (2300, 2301]; ssp370: 2101
-DT = 5.0                          # step before the record (constant pre-industrial forcing)
+# None = the inverse's own spin-up (config.t_start / config.dt), so a
+# projection relaxes exactly as the calibration did before the record takes
+# over. T_END 2301: ISMIP's nominal year 2300 is the step (2300, 2301]; 2101
+# for ssp370. Override here or with --t-start / --t-end.
+T_START, T_END = None, 2301.0
+DT = None                         # step before the record; None = config.dt
 DT_SCHEDULE = ((1850.0, 1.0),)    # annual steps from the record's first year on
 CLIMATE_MODE = "raw"              # "raw" | "anomaly" (see the docstring)
 APPLY_BIASES = True               # raw mode: add tbias, multiply by exp(log_pbias)
@@ -97,6 +110,9 @@ VTI_EVERY = 1                   # years between VTI frames (0 = off)
 ICE_H_MIN = 10.0                  # m; "ice" in the scalar diagnostics
 # --- surface-elevation feedback: t2m += FEEDBACK_LAPSE * (S_model(t) - S_ref)
 ELEVATION_FEEDBACK = True
+_cfg = fs.config
+T_START = _cfg.t_start if T_START is None else float(T_START)
+DT = _cfg.dt if DT is None else float(DT)
 FEEDBACK_T_REF = 2015.0           # S_ref = the MODEL surface at this time (no feedback before
                                   # it, so the calibrated hindcast is untouched; ISMIP's h_ref).
                                   # None -> the observed DEM the climatology sits on (feedback
@@ -483,8 +499,26 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
     if feedback is not None and FEEDBACK_T_REF is not None and not (t_start - 1e-6 <= FEEDBACK_T_REF <= t_end):
         print(f"  WARNING: FEEDBACK_T_REF {FEEDBACK_T_REF:g} lies outside the run {t_start:g}-{t_end:g}: "
               f"the reference is captured at the first step at or after it, or never")
-    print(f"before the record ({climate.years[0]}): " + ("forward_standalone's forcing (CARRA2 climatology + Vinther anomaly)"
-          if pre_record == "standalone" else f"the {climate.pre_years[0]}-{climate.pre_years[1]} climatology"))
+    # A long pre-record span has to be spun up the way the INVERSE was, or the
+    # state handed to the record is not the calibrated one. "standalone"
+    # delegates to forward_standalone's compute_smb, which carries the deep
+    # temperature series, the index precipitation multiplier and the
+    # interannual quadrature; "climatology" holds one 30-yr GCM mean, which
+    # over a millennial spin-up is the flat-hold bias the deep forcing work
+    # removed. Refused rather than warned: it costs a whole run to discover.
+    pre_span = float(climate.years[0]) - t_start
+    if pre_record == "climatology" and pre_span > 200.0:
+        raise SystemExit(
+            f"--pre-record climatology would hold the {climate.pre_years[0]}-{climate.pre_years[1]} "
+            f"GCM climatology for {pre_span:.0f} yr before the record, with no anomaly index, "
+            f"precipitation response or variance correction -- not how the inversion spun up.\n"
+            f"Use --pre-record standalone, or --t-start {climate.years[0] - 200:g} for a short "
+            f"pre-industrial relaxation.")
+    print(f"before the record ({climate.years[0]}), {pre_span:.0f} yr: "
+          + ("forward_standalone's forcing, i.e. the inverse's own (deep temperature index"
+             f"{', precip multiplier' if getattr(_cfg, 'alpha_precip', 0.0) else ''}"
+             f"{', interannual quadrature' if getattr(_cfg, 'interannual_sigma', None) else ''})"
+             if pre_record == "standalone" else f"the {climate.pre_years[0]}-{climate.pre_years[1]} climatology"))
     ctx.compute_smb = make_compute_smb(ctx, climate, mode, feedback, pre_record)
     ctx.forcing_stats = {}
     vol_prev = 0.0
