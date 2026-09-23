@@ -1038,8 +1038,12 @@ class SnowlineObservation(Observation):
     per-season SMB error std (m/yr). With per-season labels (`labels`, one
     per entry of `times`) each season is scored against ITS OWN label, so the
     term also sees which years the snowline was high; without them every
-    time is scored against the composite. No logit nuisance in this mode
-    (that machinery profiles an error on a probability's logit).
+    time is scored against the composite. `hinge_window` selects that
+    pairing: "mean_prob" instead averages the model's SNOW PROBABILITY over
+    the window and hinges on its residual against the composite fraction,
+    which is what the product observes -- see _hinge_loss. No logit
+    nuisance in this mode (that
+    machinery profiles an error on a probability's logit).
     """
 
     name = "snow"
@@ -1051,13 +1055,26 @@ class SnowlineObservation(Observation):
                  times: Optional[Sequence[float]] = None,
                  loss: str = "brier", margin: float = 0.0,
                  huber: Optional[float] = None,
-                 labels: Optional[Sequence[torch.Tensor]] = None):
+                 labels: Optional[Sequence[torch.Tensor]] = None,
+                 hinge_window: str = "per_season",
+                 margin_prob: float = 0.05):
         super().__init__(weight=weight)
         if loss not in ("brier", "hinge"):
             raise ValueError(f"SnowlineObservation loss={loss!r}: expected 'brier' or 'hinge'")
         if loss == "hinge" and logit_nuisance is not None:
             raise ValueError("SnowlineObservation: loss='hinge' has no logit nuisance; "
                              "set logit_error=None (use `huber` for robustness)")
+        if hinge_window not in ("per_season", "mean_smb", "mean_prob"):
+            raise ValueError(f"SnowlineObservation hinge_window={hinge_window!r}: expected "
+                             "'per_season', 'mean_smb' or 'mean_prob'")
+        if hinge_window != "per_season" and loss != "hinge":
+            raise ValueError("SnowlineObservation: hinge_window applies to loss='hinge'")
+        if hinge_window == "mean_prob" and sigma_p is None:
+            raise ValueError("SnowlineObservation: hinge_window='mean_prob' scores a "
+                             "probability residual, so it needs sigma_p (the per-pixel "
+                             "snow-fraction noise std) as its scale")
+        self.hinge_window = hinge_window
+        self.margin_prob = float(margin_prob)
         self.logit_nuisance = logit_nuisance
         self.sigma_p = sigma_p
         self.snow_label = snow_label
@@ -1110,19 +1127,86 @@ class SnowlineObservation(Observation):
         return d * d * (torch.sqrt(1.0 + (v / d) ** 2) - 1.0)
 
     def _hinge_loss(self, *, sim, config, weight):
+        """How the window's seasons are paired with the label. `hinge_window`:
+
+          "per_season" (default)  mean_t rho(hinge(b_t)) vs each season's own
+                                  label, the historical behaviour.
+          "mean_smb"              rho(hinge(mean_t b_t)) vs the composite.
+          "mean_prob"             rho(relu(|mean_t sigmoid(b_t/s_smb) - y|
+                                  - margin_prob)) / sigma_p^2.
+
+        Which pairing is right depends on what the label observes. The model's
+        b_t is one season's SMB, whose zero contour is that year's ELA. The
+        product records the END-OF-SUMMER SNOWLINE, i.e. the ice-firn
+        interface, which survives several years of melt and so integrates
+        them: it is a low-pass filter on the model's quantity. Scoring season
+        against season therefore asks the model to reproduce a filtered
+        observable at full bandwidth, which it cannot do at any parameter
+        setting, and the term spends its gradient on the difference (at the
+        2019 state, ~280 k cells scored wrong-side). Averaging the model over
+        the window first compares like with like: mean_t b_t against the
+        fraction of seasons that ended with snow, which is a firn-presence
+        probability. Its minimizer is mean_t b_t = margin (2y - 1), so a cell
+        that held snow in 70 % of seasons wants a slightly positive mean SMB.
+
+        WARNING on "mean_smb": it is the literal reading of "average the ELA
+        over the window", but it is NOT satisfiable at the truth. With a
+        fractional y and `two_sided`, both branches are live, so a cell pays
+        y rho(relu(m - b)) + (1 - y) rho(relu(m + b)) and only |b| <= m gives
+        zero. Every cell in the transition band, where y is fractional over
+        several hundred metres of elevation while the true mean SMB runs from
+        clearly negative to clearly positive, therefore carries a standing
+        gradient pulling its mean SMB toward zero -- i.e. it FLATTENS the
+        SMB-elevation gradient exactly where the snowline's sensitivity is
+        set. Raising `margin` does not help: the floor at y = 0.5 is rho(m),
+        so the loss grows with it. On a synthetic band (sigma_y 0.5 m/yr,
+        21 seasons) the true state scores 0.0013 under "per_season" and
+        0.985 under "mean_smb". Kept because it is sometimes the right thing
+        for a nearly binary label, but not the default.
+
+        "mean_prob" is the pairing that the product actually justifies. The
+        model's ELA is averaged as a PROBABILITY, not as an SMB -- mean_t
+        sigmoid(b_t / s_smb) is the model's fraction of seasons ending with
+        snow, which is what `snow_fraction` measures -- and the hinge is
+        taken on the residual against the label, so the term saturates once
+        the model is within `margin_prob` of it. That keeps the property the
+        hinge was adopted for, which the Brier score lacks: in the interior
+        y = 1 and p ~ 0.95, and a Brier term keeps paying 0.05 and pulling
+        precipitation up, while this one is exactly zero. `sigma_p` is the
+        scale, since the residual is dimensionless.
+        """
         states = [sim.at(t) for t in self.times]
         level = states[0].level
-        omega = self._target_at(level)[0]
-        total = None
-        for k, st in enumerate(states):
-            b = st.smb_coarse
-            y = self._season_label_at(k, level)
-            l = y * self._rho(torch.relu(self.margin - b))
+        omega, composite = self._target_at(level)
+        if self.hinge_window == "mean_prob":
+            p = torch.sigmoid(states[0].smb_coarse / self.s_smb)
+            for st in states[1:]:
+                p = p + torch.sigmoid(st.smb_coarse / self.s_smb)
+            p = p / float(len(states))
+            total = self._rho(torch.relu((p - composite).abs() - self.margin_prob))
+            c = weight * 4.0 ** level / self.sigma_p ** 2
+            return config.loss_scale * c * (omega * total).sum()
+        if self.hinge_window == "mean_smb":
+            b = states[0].smb_coarse
+            for st in states[1:]:
+                b = b + st.smb_coarse
+            b = b / float(len(states))
+            total = composite * self._rho(torch.relu(self.margin - b))
             if self.two_sided:
-                l = l + (1.0 - y) * self._rho(torch.relu(self.margin + b))
-            total = l if total is None else total + l
+                total = total + (1.0 - composite) * self._rho(torch.relu(self.margin + b))
+            n_seasons = 1.0
+        else:
+            total = None
+            for k, st in enumerate(states):
+                b = st.smb_coarse
+                y = self._season_label_at(k, level)
+                l = y * self._rho(torch.relu(self.margin - b))
+                if self.two_sided:
+                    l = l + (1.0 - y) * self._rho(torch.relu(self.margin + b))
+                total = l if total is None else total + l
+            n_seasons = float(len(states))
         c = weight * 4.0 ** level / self.s_smb ** 2
-        return config.loss_scale * c * (omega * total).sum() / float(len(states))
+        return config.loss_scale * c * (omega * total).sum() / n_seasons
 
     def loss(self, *, sim, physical, config, domain, mask, dx, weight):
         if self.loss_kind == "hinge":
@@ -1673,6 +1757,22 @@ class SnowlineSpec:
     loss: str = "brier"
     margin: float = 0.0
     huber: Optional[float] = None
+    # How the window's seasons pair with the label (loss="hinge" only).
+    # The product is the END-OF-SUMMER SNOWLINE, i.e. the ice-firn interface,
+    # which survives several melt seasons and so low-pass filters the model's
+    # per-season ELA. "per_season" scores each season against its own label,
+    # which asks the model to reproduce a filtered observable at full
+    # bandwidth. "mean_prob" averages the model as a PROBABILITY over the
+    # window and hinges on the residual against the composite
+    # `snow_fraction`, which is the pairing the product justifies and which
+    # keeps the saturation the hinge was adopted for (needs sigma_p as the
+    # scale; `margin_prob` is the dimensionless tolerance). "mean_smb"
+    # averages the SMB instead -- the literal "average the ELA" reading, but
+    # it is not satisfiable at the truth and flattens the SMB gradient across
+    # the transition band; see SnowlineObservation._hinge_loss. Per-year
+    # labels are loaded only for "per_season".
+    hinge_window: str = "per_season"
+    margin_prob: float = 0.05
 
     def build(self, ctx: ObservationBuildContext) -> Optional[SnowlineObservation]:
         sd = ctx.snowline_data
@@ -1708,8 +1808,8 @@ class SnowlineSpec:
                 t0, t1 = self.window
             times = [float(y) + 1.0 for y in range(int(round(t0)), int(round(t1)) + 1)]
         labels = None
-        if self.loss == "hinge" and times is not None and "snow_label" in sd \
-                and "year" in sd.snow_label.dims:
+        if self.loss == "hinge" and self.hinge_window == "per_season" and times is not None \
+                and "snow_label" in sd and "year" in sd.snow_label.dims:
             have = {int(y) for y in sd.year.values}
             years = [int(round(t - 1.0)) for t in times]
             missing = [y for y in years if y not in have]
@@ -1727,7 +1827,8 @@ class SnowlineSpec:
                                           eps_max=self.eps_max)
                             if self.logit_error is not None else None),
             sigma_p=self.sigma_p, loss=self.loss, margin=self.margin,
-            huber=self.huber, labels=labels)
+            huber=self.huber, labels=labels, hinge_window=self.hinge_window,
+            margin_prob=self.margin_prob)
 
 
 @dataclass(frozen=True)

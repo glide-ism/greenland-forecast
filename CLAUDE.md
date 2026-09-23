@@ -191,6 +191,34 @@ and forth by diff):
    slightly NEGATIVE pull there (the NE high-snowline years), 46 % at
    800-1400 m; J_snow ~650 x (0.25/0.35)^2 at that state. Coarse-domain
    test: forward+backward as fast as Brier, +0.7 GB for the 21 labels.
+   **`hinge_window` (2026-09-23), how the window's seasons pair with the
+   label.** The product is the END-OF-SUMMER SNOWLINE, i.e. the ice-firn
+   interface, which survives several melt seasons; the model's b_t is ONE
+   season's SMB whose zero contour is that year's ELA. The product is
+   therefore a low-pass filter on the model's quantity, which is why the
+   model's yearly bare-ice area is ~3x too variable (std 99 k vs 31 k, 2019
+   506 k vs 223 k, r 0.38) while its mean snowline and its integrated SMB
+   variability are both right - a quantity mismatch, NOT a model defect, and
+   not something to chase in firn physics. `"per_season"` (the default, what
+   v4-v7 ran) scores each season against its own `snow_label`, i.e. asks for
+   a filtered observable at full bandwidth; at the 2019 state that is ~280 k
+   cells scored wrong-side, a battle the model cannot win at any parameter
+   setting. `"mean_prob"` averages the model as a PROBABILITY over the
+   window, mean_t sigmoid(b_t / s_smb) = its fraction of seasons ending with
+   snow, and hinges on the residual against the composite `snow_fraction`
+   with tolerance `margin_prob` and scale `sigma_p`: the pairing the product
+   justifies, and it keeps the saturation the hinge exists for, which the
+   Brier window path lacks (interior y = 1, p ~ 0.95, Brier keeps paying
+   0.05 and pulling precipitation up; this is exactly 0). `"mean_smb"` is the
+   literal "average the ELA over the window" reading and is BROKEN - with a
+   fractional y and two_sided both branches are live, so only |mean b| <=
+   margin gives zero and every cell in the transition band carries a standing
+   pull toward zero mean SMB. Synthetic band (21 seasons, sigma_y 0.5 m/yr),
+   loss at the true state / at a 2.5x-FLATTENED SMB gradient: per_season
+   0.0013 / 2.98, mean_prob 0.150 / 2.12, mean_smb 0.985 / 0.342 - i.e.
+   mean_smb PREFERS the flattened state, which is the ELA-band pathology
+   itself. Use `mean_prob`; mean_smb is kept only for a near-binary label.
+   Per-year labels are loaded only for `per_season`.
    **`inverse_v4` (hinge, 2026-09-20; `analysis/output/basin_mb_v4/`)**: best
    snowline fit (bare ice 167 k vs 171 k km2, P(snow) within 0.03 of the label
    in every band above 200 m, mean bias +0.002) and best interannual SMB yet
