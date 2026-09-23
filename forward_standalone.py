@@ -60,7 +60,14 @@ DOMAIN = "domains/greenland"
 LEVEL = 0                         # multigrid level to run on (0 = finest, 1 km)
 CHECKPOINT = None                 # default: {config.output_dir}/level_0/torch_vars.p
 OUT_DIR = None                    # default: {config.output_dir}/forward_standalone
-T_START, T_END, DT = 1850, 2100, 1   # default: the config's window
+#T_START, T_END, DT = 1850, 2100, 1   # default: the config's window
+T_START, T_END, DT = None, None, None   # default: the config's window
+DT_SCHEDULE = None                # None = config.dt_schedule. Otherwise a tuple of
+                                  # (from_time, dt_max) pairs refining the uniform DT
+                                  # grid after each time, e.g. ((1850.0, 10.0),) to run
+                                  # a long DT spin-up and drop to 10-yr steps at 1850.
+                                  # Use it with T_START/DT to append a spin-up here
+                                  # without touching the config the inverse ran on.
 SNAP_TIMES = ()                   # extra breakpoints (e.g. observation epochs) so the
                                   # step sequence matches the inverse's exactly
 RESET_VELOCITY = False            # zero u, v, ud, vd before each momentum solve: with
@@ -87,11 +94,13 @@ Q0, H00 = None, None              # baseline margins; None -> config.calving_q /
 config = load_config(DOMAIN)
 
 CHECKPOINT = CHECKPOINT or f"{config.output_dir}/level_0/torch_vars.p"
-OUT_DIR = Path(OUT_DIR or f"{config.output_dir}/forward_standalone")
+OUT_DIR = Path(OUT_DIR or f"{config.output_dir}/forward_standalone_v2")
 PHYSICAL_PATH = Path(config.output_dir) / "physical_fields.nc"
 T_START = config.t_start if T_START is None else T_START
 T_END = config.t_end if T_END is None else T_END
 DT = config.dt if DT is None else DT
+DT_SCHEDULE = config.dt_schedule if DT_SCHEDULE is None else tuple(
+    (float(t), float(d)) for t, d in DT_SCHEDULE)
 Q0 = config.calving_q if Q0 is None else float(Q0)
 H00 = config.calving_h0 if H00 is None else float(H00)
 OCEAN = config.ocean_forcing if OCEAN is None else OCEAN
@@ -175,7 +184,8 @@ def load_ocean_forcing() -> Optional[OceanForcing]:
     if not THERMAL_PATH.exists():
         print(f"no thermal forcing at {THERMAL_PATH}: constant margins q = {Q0:g}, h0 = {H00:g} m")
         return None
-    of = OceanForcing.from_file(THERMAL_PATH, 2 ** config.n_levels, OCEAN, q0=Q0, h00=H00)
+    of = OceanForcing.from_file(THERMAL_PATH, 2 ** config.n_levels, OCEAN, q0=Q0, h00=H00,
+                               freeze_anomaly=getattr(config, "climatology_only", False))
     print(of.describe())
     return of
 
@@ -231,8 +241,14 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
     # (config.yearly_climate_filename; None or a missing file = the index
     # everywhere). Same loader as the inverse; read from the file per call
     # (no host cache: the driver evaluates each year once).
+    # config.climatology_only: reference climate for the whole run (the same
+    # switch the inverse honours) - no yearly fields, no anomaly index, so
+    # the run measures the model's own relaxation from the initial geometry.
+    climatology = getattr(config, "climatology_only", False)
+    alpha_t2m_eff = 0.0 if climatology else config.alpha_t2m
+    base_anomaly_eff = 0.0 if climatology else base_anomaly
     yearly = None
-    if config.yearly_climate_filename is not None:
+    if config.yearly_climate_filename is not None and not climatology:
         yc_path = Path(config.base_dir) / "model_inputs" / config.yearly_climate_filename
         if yc_path.exists():
             from glacier_inverse.yearly_climate import YearlyClimate
@@ -240,6 +256,39 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
             print(yearly.describe())
         else:
             print(f"yearly climate {yc_path} missing: climatology + index anomaly everywhere")
+    # The index precipitation multiplier (config.precip_anomaly_filename,
+    # preprocessing/make_precip_anomaly.py), exactly as forward.simulate
+    # applies it: the weighted mean over the step's INDEX years divided by the
+    # base year, INDEX YEARS ONLY - record years already carry their own
+    # precip_ratio. Without this a replay would run wetter than the inversion
+    # everywhere before the reanalysis record. climatology_only zeroes it, the
+    # same way problem.py passes precip_anomaly=None there.
+    p_anom = base_precip = p_year_max = None
+    alpha_precip_eff = 0.0 if climatology else float(getattr(config, "alpha_precip", 0.0))
+    pa_path = Path(config.base_dir) / "model_inputs" / config.precip_anomaly_filename
+    if pa_path.exists() and alpha_precip_eff != 0.0:
+        pa = xr.load_dataset(pa_path)
+        p_anom = {int(y): float(v) for y, v in zip(pa.time.values, pa.precip_anomaly.values)}
+        p_year_max = max(p_anom)
+        base_precip = p_anom[int(config.base_precip_year)]
+        print(f"precip anomaly {pa_path.name}: alpha_precip {alpha_precip_eff:g}, "
+              f"base {config.base_precip_year} = {base_precip:.6f}, "
+              f"{min(p_anom)}-{p_year_max}")
+    # Interannual-variance quadrature over the index years, exactly as
+    # forward.simulate applies it (the same nodes, and the same rule that it
+    # never touches reanalysis years). Not gated on climatology_only: the
+    # variance belongs to the climate, not to the anomaly.
+    from glacier_inverse.forward import _hermite_nodes
+    _sig = getattr(config, "interannual_sigma", None)
+    if _sig:
+        _x, _w = _hermite_nodes(int(getattr(config, "interannual_nodes", 3)))
+        nodes = (tuple(_sig * xi for xi in _x), _w)
+        print(f"interannual quadrature: sigma {_sig:g} K, {len(_x)} nodes "
+              f"at {'/'.join(f'{_sig * xi:+.2f}' for xi in _x)} K")
+    else:
+        nodes = ((0.0,), (1.0,))
+    if climatology:
+        print("climatology mode: reference climate for every step (no yearly fields, no anomaly index)")
 
     ny, nx = gd.sizes["y"], gd.sizes["x"]
     dx = float(gd.x[1] - gd.x[0])
@@ -323,9 +372,10 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
                                         np.random.default_rng(config.enthalpy_seed))
     domain_mask = cp.asarray(gd.domain_mask.values, dtype=bool)
 
-    def smb_index(shift) -> cp.ndarray:
+    def smb_index(shift, precip_multiplier: float = 1.0) -> cp.ndarray:
         g.temperature.t2m.set(t2m + shift)
-        g.precipitation.precip.set(precip)
+        g.precipitation.precip.set(precip if precip_multiplier == 1.0
+                                   else precip * precip_multiplier)
         smb_model.forward(temp_deviations=temp_dev)
         return g.state.smb.data.mean(axis=0)
 
@@ -351,7 +401,17 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
         if index:
             w_index = sum(w for _, w in index)
             a = sum(w * t_anom[min(y, year_max)] for y, w in index) / w_index
-            smb += w_index * smb_index(config.alpha_t2m * a - base_anomaly + tbias)
+            mult = 1.0
+            if p_anom is not None:
+                p_ratio = sum(w * p_anom[min(y, p_year_max)]
+                              for y, w in index) / w_index / base_precip
+                mult = 1.0 + alpha_precip_eff * (p_ratio - 1.0)
+            shift = alpha_t2m_eff * a - base_anomaly_eff
+            # The interannual-variance quadrature (forward._expand_interannual).
+            # One scalar term here, as in the inverse's "mean_anomaly", so it
+            # carries no spread of its own and takes the full sigma.
+            for xi, wi in zip(*nodes):
+                smb += w_index * wi * smb_index(shift + xi + tbias, mult)
         smb[~domain_mask] = -10.0
         return smb
 
@@ -445,10 +505,11 @@ def run(ctx: Run) -> None:
     f32 = lambda a: cp.asarray(np.asarray(a), dtype=cp.float32)
     srf, u_s, v_s, dhdt, vti_writer, vti_dir = ctx.srf, ctx.u_s, ctx.v_s, ctx.dhdt, ctx.vti_writer, ctx.vti_dir
     ### Time loop: the inverse's step design (uniform DT grid, refined by
-    ### config.dt_schedule, snapped onto SNAP_TIMES = observation epochs)
+    ### DT_SCHEDULE = config.dt_schedule unless overridden at the top,
+    ### snapped onto SNAP_TIMES = observation epochs)
     seq = build_step_sequence(t_start=float(T_START), t_end=float(T_END), dt_max=float(DT),
                               required_times=[float(t) for t in SNAP_TIMES],
-                              dt_schedule=config.dt_schedule)
+                              dt_schedule=DT_SCHEDULE)
     ends = [t for t, _ in seq]
     steps = list(zip([float(T_START)] + ends[:-1], ends))
     for t_prev, t_next in steps:
@@ -474,6 +535,7 @@ def run(ctx: Run) -> None:
                       ("v_s", 0.5 * (v_s.data[1:, :] + v_s.data[:-1, :]))]:
         out[name] = xr.DataArray(cp.asnumpy(arr), dims=("y", "x"))
     out.attrs.update(level=level, t_start=float(T_START), t_end=float(T_END), dt=float(DT),
+                     dt_schedule=repr(DT_SCHEDULE), n_steps=len(steps),
                      checkpoint=str(CHECKPOINT), crs_wkt=crs.to_wkt(),
                      ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
                                     else f"constant margins q = {Q0:g}, h0 = {H00:g} m"))
@@ -482,7 +544,14 @@ def run(ctx: Run) -> None:
 
 
 def main(export_only: bool = False) -> None:
-    if export_only or not PHYSICAL_PATH.exists():
+    # re-export when the checkpoint is newer than the cached fields: an
+    # inversion rerun into the same results_subdir otherwise replays the
+    # PREVIOUS state without a word (2026-09-20)
+    stale = (PHYSICAL_PATH.exists() and Path(CHECKPOINT).exists()
+             and Path(CHECKPOINT).stat().st_mtime > PHYSICAL_PATH.stat().st_mtime)
+    if stale:
+        print(f"{PHYSICAL_PATH.name} is older than {CHECKPOINT}: re-exporting")
+    if export_only or stale or not PHYSICAL_PATH.exists():
         export_physical_fields(CHECKPOINT, PHYSICAL_PATH)
         if export_only:
             return

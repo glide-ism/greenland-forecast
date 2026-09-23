@@ -67,38 +67,22 @@ CONFIG = GlacierConfig(
     base_dir=str(_HERE),
     vti_base_name="greenland",
     gridded_filename=_GRIDDED_FILE,
-    results_subdir=f"inverse_v7",
+    results_subdir=f"inverse_v6_{CLIMATE}",
     smb_model="enthalpy",
     anomaly_integration="mean_anomaly",
-    #anomaly_filename = "temperature_anomaly_flat.nc",
-    # Interannual-variance quadrature over the index years (2026-09-22).
-    # 1.05 K is the measured ice-sheet-mean JJA interannual std of the
-    # forcing (hybrid yearly file, 1986-2025: JJA 1.055, annual 1.023), which
-    # is the right one because the scalar anomaly shifts every month and melt
-    # only feels summer. Independently confirmed: with the OCX-implied
-    # curvature of -160 Gt/yr/K^2, 0.5 * curv * (1.055^2 - 0.6^2) = -60 Gt/yr
-    # against the -62 the OCX experiment measured between the index and the
-    # resolved yearly fields at identical mean forcing. A deep step resolves
-    # none of it, so the correction there is 0.5 * curv * 1.055^2 = -89 Gt/yr.
-    # 3 nodes = 3 SMB evaluations per index step instead of 1; with dt 50 from
-    # t_start and 10-yr steps after 1850 that is ~100 extra glare calls for
-    # the whole run, against no change to the dynamics solves.
-    #interannual_sigma=None,
-    interannual_sigma=1.05,
-    interannual_nodes=3,
     stress_scheme="molho",
 
     # ---- time: historical window ending at the ISMIP7 projection start.
     # Observations: surface ~2015 (ArcticDEM overlay) / 2007 (BedMachine
     # surface), velocity 2015-16, extent ~2015, ATL15 dh/dt 2019-2023 (the
     # horizon auto-extends to the latest observation).
-    t_start=100.0,
-    t_end=2020.0,
-    dt=25.0,
+    t_start=1700.0,
+    t_end=2015.0,
+    dt=10.0,
     # 3-yr steps over the observational period (equal sub-steps between the
     # epochs 1992, 2008, 2015, 2018, 2019, 2026; the coarse dt before 1990)
-    dt_schedule=((1850,10.0),(1990.0, 1.0),),
-    grad_start_time=1700,      # revisit once a level-3 FD sweep is done
+    dt_schedule=((1990.0, 1.0),),
+    grad_start_time=1850,      # revisit once a level-3 FD sweep is done
     # temperature_anomaly.nc is the Vinther SW-Greenland JJA series (1784-2013,
     # CARRA2-extended to 2025), referenced to the CARRA2 climatology window,
     # so no base year is subtracted. alpha_t2m scales the coastal anomaly
@@ -107,29 +91,6 @@ CONFIG = GlacierConfig(
     # (analysis/arctic_amplification.py --regressor vinther).
     base_anomaly_year=None,
     alpha_t2m=0.6,
-    # Precipitation follows the same index (2026-09-22,
-    # preprocessing/make_precip_anomaly.py -> precip_anomaly.nc). Before this
-    # the pathway was dormant (no file, alpha_precip 0), so accumulation sat
-    # at the modern climatology through the whole spin-up while only the
-    # temperature half of a colder past was applied - a one-signed bias that
-    # grows with the spin-up length. The file holds
-    # exp(gamma_ann * dTann_dindex * index) normalized to 1 at
-    # `base_precip_year`, with gamma_ann 5 %/K of ice-sheet ANNUAL temperature
-    # and dTann_dindex 0.73 (measured over 1986-2025), i.e. 3.65 %/K of index.
-    # alpha_precip multiplies gamma to first order, so sweep it here rather
-    # than rebuilding: 1.0 = 5 %/K, 0.0 = the old flat accumulation, 1.4 = the
-    # Clausius-Clapeyron ceiling. 5 %/K is the modelling convention and the
-    # ice-core glacial-interglacial value; the 40-yr reanalysis gives
-    # +2.3 +- 1.2 %/K, indistinguishable from zero because interannual
-    # Greenland precipitation is circulation-driven, so it neither supports
-    # nor excludes it. The multiplier acts on INDEX years only - record years
-    # carry their own per-year precip_ratio - so it cannot double-count.
-    # Base year 2006: the climatology-window year whose index is closest to
-    # zero (-0.054 K, a 0.20 % residual), since the library references this
-    # series to a single year and a climatology reference is what is wanted.
-    #alpha_precip=0.0,
-    alpha_precip=1.0,
-    base_precip_year=2006,
     # 2026-09-18: the years CARRA2 covers (1986-2025) are forced by the
     # reanalysis year itself (t2m anomaly + precip ratio on the climatology,
     # preprocessing/make_climate_yearly.py); the Vinther index only acts
@@ -139,15 +100,6 @@ CONFIG = GlacierConfig(
     # inversions). The fields never sit on the tape (yearly_climate.py).
     yearly_climate_filename=_YEARLY_FILE,
     yearly_climate_cache="ram",
-    # Drift / spin-up diagnostic (2026-09-22): True holds the atmosphere at
-    # the reference climate for the whole run (monthly climatology + the
-    # calibrated tbias / pbias, no yearly fields, no Vinther index), so the
-    # dh/dt the model produces is its own relaxation from the initial
-    # geometry. The ocean is held at its TF climatology by the same flag
-    # (dTF = 0, so the margins keep their climatological geography but no
-    # interannual variability) - the thermal forcing drives mass change on
-    # the same order as the atmosphere, so both have to be fixed.
-    climatology_only=False,
 
     n_levels=6,
     max_level=2,
@@ -185,7 +137,7 @@ CONFIG = GlacierConfig(
     # its flotation thickness, so floating tongues thicker than that persist
     # (the example's inverse uses timescale 0.1 with the same q).
     thklim=1.0,
-    sigmoid_c=0.1,
+    sigmoid_c=1.0,
     calving_timescale=0.5,
     # baselines of the hybrid threshold H - H_f < q H + h0: q = 0 calves
     # exactly the floating ice before the ocean warms (the standalone
@@ -231,7 +183,7 @@ CONFIG = GlacierConfig(
     bed_prior=PriorHyperparams(sigma=500.0, l=4000.0, nu=1),
     mean_prior=PriorHyperparams(sigma=1000.0, l=30000.0, nu=1),
     log_beta_prior=PriorHyperparams(sigma=1.0, l=8000.0, nu=1),
-    pbias_prior=PriorHyperparams(sigma=0.3, l=50000.0, nu=1),
+    pbias_prior=PriorHyperparams(sigma=0.1, l=50000.0, nu=1),
     tbias_prior=PriorHyperparams(sigma=1.0, l=50000.0, nu=1),
     h_atm_prior=PriorHyperparams(sigma=0.2, l=150000.0, nu=1),
     cloud_prior=PriorHyperparams(sigma=0.25, l=150000.0, nu=1),
@@ -260,16 +212,16 @@ CONFIG = GlacierConfig(
         # SMB). The floor is the model's own error on slow ice and covers the
         # mosaic's zero-error pixels; 5 % of speed is its structural error at
         # the outlets. Was: MaternNoise(sigma=100.0, l=10000.0, nugget=100.0).
-        VelocitySpec(noise=MaternNoise(sigma=1.0, l=10000.0, nugget=1.0), weight=1.0,
-                     per_pixel_error=True, sigma_floor=10.0, sigma_rel=0.05, sigma_rel_km=5.0,
+        #VelocitySpec(noise=MaternNoise(sigma=1.0, l=10000.0, nugget=1.0), weight=1.0,
+        #             per_pixel_error=True, sigma_floor=5.0, sigma_rel=0.05, sigma_rel_km=5.0,
+        #             surge_biased=False, mask_unobserved=True, nu=3),
+        VelocitySpec(noise=MaternNoise(sigma=50.0, l=10000.0, nugget=50.0), weight=1.0,
                      surge_biased=False, mask_unobserved=True, nu=3),
-        #VelocitySpec(noise=MaternNoise(sigma=50.0, l=10000.0, nugget=50.0), weight=1.0,
-        #             surge_biased=False, mask_unobserved=True, nu=1),
 
         ExtentSpec(weight=1.0, s_H=10.0, sigma_p=0.3,
                    logit_error=MaternNoise(sigma=0.3, l=5000.0),
                    nuisance_inner_steps=2, eps_max=1.0),
-        #BedSpec(weight=0.0),     # data lives in the conditioned prior map
+        BedSpec(weight=0.0),     # data lives in the conditioned prior map
         # 2000-2020 end-of-summer snowlines (make_snowline.py): the label is
         # the fraction of seasons with snow, so the model probability is the
         # mean over those 21 years of sigmoid(SMB_year / s_smb) — each year
@@ -294,7 +246,7 @@ CONFIG = GlacierConfig(
         # l=10000.0), nuisance_inner_steps=2, eps_max=1.0).
         SnowlineSpec(weight=1.0, loss="hinge", s_smb=0.35, margin=0.02,
                      huber=1.0, window="file", two_sided=True),
-         #sigma_floor 0.1 (2026-09-21; the default 0.5 was set for the
+        # sigma_floor 0.1 (2026-09-21; the default 0.5 was set for the
         # ablation zone): times noise.sigma the effective interior floor is
         # 0.05 m/yr - the firn-anomaly uncertainty the model cannot
         # represent - instead of 0.25, so the products' 0.2-2 cm/yr interior
@@ -310,9 +262,9 @@ CONFIG = GlacierConfig(
         # non-overlapping window that spans the onset of the tidewater
         # retreats (make_dhdt.py --source itslive_dh --t0 1992 --t1 2019
         # --name measures). Skipped when the file is absent.
-        #DhdtSpec(filename="gridded_dhdt_measures.nc", name="dhdt_measures",
-        #         noise=MaternNoise(sigma=0.5, l=10000.0, nu=0.5, nugget=0.5),
-        #         sigma_floor=0.1, sigma_rel=0.25, sigma_rel_km=5.0, weight=1.0, nu=3),
+        DhdtSpec(filename="gridded_dhdt_measures.nc", name="dhdt_measures",
+                 noise=MaternNoise(sigma=0.5, l=10000.0, nu=0.5, nugget=0.5),
+                 sigma_floor=0.1, sigma_rel=0.25, sigma_rel_km=5.0, weight=1.0, nu=3),
     ),
     loss_scale=1e-3,
     bed_conditioning=BedConditioningConfig(
@@ -335,8 +287,8 @@ CONFIG = GlacierConfig(
         pcg_rtol_adjoint=1e-2),
 
     lr_z_bed=0.025,
-    lr_z_log_beta=0.25,
-    lr_z_pbias=1.0,             # see influence_cap
+    lr_z_log_beta=0.02 * 9 * 9,
+    lr_z_pbias=5.0,             # see influence_cap
     lr_z_tbias=1.0,
     lr_z_log_H_atm=1.0,
     lr_z_logit_cloud=1.0,

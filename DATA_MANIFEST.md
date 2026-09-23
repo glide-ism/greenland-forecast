@@ -37,7 +37,8 @@ optional (term dropped gracefully when absent); **F** forecast phase only
 | 13 | ERA5-Land monthly t2m/tp, Greenland box | `make_era5land_vars.py` → *_era5land companions (intercomparison) | O | `climate/era5land/era5land_greenland.nc` |
 | 14 | IceBridge MCoRDS L2 (IRMCR2) + pre-IceBridge (BRMCR2) | `make_bedradar.py` → flightlines.gpkg → radar-pick bed conditioning | O | `flightlines/{irmcr2,brmcr2}/**/*.csv` |
 | 15 | End-of-summer snowlines 2000-2020, yearly shapefiles (closed rings, 500 m lattice) | `make_snowline.py` → snow_fraction (fraction of seasons with snow) → snowline (ELA) term | O | `snowlines/<year>_snowline.zip` |
-| 16 | Greenland accumulation reconstruction (Box et al. 2013 / NGRIP) | `make_precip_anomaly.py` → precip_anomaly.nc | O | `climate/precip_anomaly/greenland_accumulation.csv` |
+| 16 | Greenland accumulation reconstruction (Box et al. 2013 / NGRIP) | `make_precip_anomaly.py` → precip_anomaly.nc; **preferred over the fallback**, which scales the temperature index at 5 %/K (see CLAUDE.md) and is what is on disk now | O | `climate/precip_anomaly/greenland_accumulation.csv` |
+| 16b | GISP2 4000-yr Ar-N temperature (Kobashi et al. 2011) | `make_temperature_anomaly.py --deep-source gisp2` → the pre-1785 half of temperature_anomaly.nc | O | `climate/temp_anomaly/gisp2-temperature2011.txt` |
 | 17 | Hugonnet et al. (2021) dh/dt tiles, RGI 05 | `make_dhdt.py --source hugonnet` (peripheral glaciers) | O | `dhdt/hugonnet/{dhdt,dhdt_err}/*.tif` |
 | 18 | MAR v3.12–3.14 / RACMO2.3p2 (1 km) SMB climatologies | validation of the calibrated SMB; ISMIP7 SMB reference | F/S | `smb/{mar,racmo}/…` |
 | 19 | ISMIP7 Greenland forcing MIPkit (SMB anomalies, ocean thermal forcing / retreat) | forecast experiments | F | `ismip7/…` (Globus) |

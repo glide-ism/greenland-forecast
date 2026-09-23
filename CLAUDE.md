@@ -167,6 +167,250 @@ and forth by diff):
    states (each keeps its fine SMB, 19 MB at 1 km); coarse-domain test:
    +0.7 GB, +1.7 s backward at level 2. `greenland_coarse` has the file
    too (smoke test includes the term).
+11. `observations.SnowlineSpec(loss="hinge", margin=, huber=)` (2026-09-20;
+   default `"brier"` = the Alaska behaviour): a squared hinge on the SIGN of
+   each season's SMB instead of a Brier score on sigmoid(SMB / s_smb). Per
+   cell i, season t, label y in [0, 1], SMB b: v+ = relu(m - b), v- =
+   relu(m + b), l = y rho(v+) + (1 - y) rho(v-), rho(v) = v^2/2 (pseudo-Huber
+   delta^2 (sqrt(1 + (v/delta)^2) - 1) with `huber` = delta), J = loss_scale
+   weight 4^level / s_smb^2 sum_i omega_i mean_t l. It is the one-sided
+   Gaussian: "b_true > 0 observed, error N(0, s_smb^2)" has log-likelihood
+   -log Phi(b/s), wrong-side asymptote b^2 / 2 s^2, right side -> 0; the
+   hinge keeps the asymptote and makes the right side EXACTLY zero, so a
+   cell right by the margin has no loss and no gradient whatever its SMB
+   (the logistic could not saturate on the interior's 0.1-0.5 m/yr and
+   pulled precipitation up), while a wrong cell feels a gradient linear in
+   the violation (Brier's ~ p(1-p) vanishes when badly wrong). Fractional y
+   minimizes at b = m (2y - 1): the margin is the SMB half-width of the
+   snowline inside a cell. With a window and per-year `snow_label` in the
+   file every season is scored against ITS OWN label (uint8 on the device,
+   restricted per level with the mask weights). `sigma_p` unused;
+   `logit_error` raises (no nuisance in this mode). Greenland: s_smb 0.35
+   (per-cell per-season SMB error std), margin 0.05, huber 1.0, two-sided.
+   Offline on the s_smb-0.1 state: < 5 % of the sum above 2000 m with a
+   slightly NEGATIVE pull there (the NE high-snowline years), 46 % at
+   800-1400 m; J_snow ~650 x (0.25/0.35)^2 at that state. Coarse-domain
+   test: forward+backward as fast as Brier, +0.7 GB for the 21 labels.
+   **`inverse_v4` (hinge, 2026-09-20; `analysis/output/basin_mb_v4/`)**: best
+   snowline fit (bare ice 167 k vs 171 k km2, P(snow) within 0.03 of the label
+   in every band above 200 m, mean bias +0.002) and best interannual SMB yet
+   (std 124 vs 110, slope on Mankoff 1.08, dSMB/dT_jja -83 vs -80, trend -28
+   vs -27 Gt/yr/decade, r 0.95); pbias x0.98 EVERYWHERE (precip 846 vs CARRA2
+   raw 911) - the interior pull is gone. But SMB mean 453 (Mankoff 337), D 512
+   (485), MB -58 (-148), windows -81 / -46 vs the products' -148 / -152: fitting
+   the ELA exactly removed the last of the too-large ablation zone (below
+   1400 m -85 Gt/yr vs -143 with s_smb 0.1). By elevation band against the
+   kit's SDBN1 acabf (CESM2-driven, 2000-2014, main sheet, 4 km; total +361
+   vs model +453): below 1200 m -49 vs -66 (+17), 1200-2000 m +138 vs +111
+   (+27), above 2000 m +365 vs +315 (+50: 0.41 / 0.34 m ice/yr vs 0.37 /
+   0.28). So with the right ELA the residual is mostly ACCUMULATION - CARRA2
+   precipitation (+15 % vs RACMO) and no sublimation term - which only pbias
+   can remove and only the long-wavelength mass budget can drive: the
+   basin-integrated mass-change term is the next step (or a pbias prior mean
+   from the RACMO/CARRA2 precip ratio). Also: yearly bare-ice AREA is too
+   variable (std 79 k vs 30 k km2, 2019 453 k vs 226 k, r 0.52) although the
+   SMB variability is right.
+
+12. `observations.VelocitySpec(per_pixel_error=, sigma_floor=, sigma_rel=)`
+   and `DhdtSpec(sigma_rel=)` (2026-09-21; defaults off = the Alaska
+   behaviour). Velocity: per-component per-pixel stds from the mosaic's
+   `vx_err` / `vy_err`, sigma_c = max(sigma_floor, err_c, sigma_rel |v|),
+   the residual normalized by them before whitening and the Matérn member
+   registered with unit sigma (`noise.sigma` a multiplier, the nugget in
+   units of the per-pixel std — the DhdtObservation convention); the surge
+   marginal takes the mean of the two stds per pixel; the RTO draw scales
+   the unit member per pixel. dh/dt: sigma = max(sigma_floor, err, sigma_rel
+   |dh/dt obs|) (times noise.sigma) in both branches. Greenland:
+   `VelocitySpec(noise=MaternNoise(sigma=1, l=10 km, nugget=1),
+   per_pixel_error=True, sigma_floor=5, sigma_rel=0.05)` and both DhdtSpecs
+   `sigma_floor=0.1, sigma_rel=0.25` (effective interior floor 0.05 m/yr
+   with noise.sigma 0.5). Why: the ITS_LIVE summary mosaic reports errors of
+   0-3 m/yr in the interior (and 0.00 on most ablation-zone pixels, hence
+   the floor), ATL15 0.2-0.6 cm/yr and ITS_LIVE dh 0.4-2 cm/yr; the scalar
+   velocity sigma of 100 m/yr and the 0.5 m/yr dh/dt floor made both terms
+   blind to the interior — at the converged v5 state the whitened rms above
+   2000 m was 0.03 (vel) / 0.13 (dhdt) and at 1200-2000 m 0.14 / 0.60, i.e.
+   "perfectly fit", while the model thickens 5-10 cm/yr there against the
+   products' -2 (the northern accumulation excess) and flux divergence was
+   free to absorb any SMB change (v5: D fell 1:1 with SMB). Under the new
+   specs the same state reads 0.5 / 2.1 (vel, > 2000 / 1200-2000 m) and
+   0.5 / 1.9 (ATL15) — the excess is now a 2-3 sigma signal over 400 k
+   cells; the ablation zone reads 6-9 sigma (the outlets' retreat-timing
+   misfit, 0.5-1 m/yr, which the old floor had hidden; Huber nu = 1 bounds
+   its pull). Level-2 test 1985-2026: 13 s, 7.4 GB, gradients finite; the
+   prior-state loss goes 2100 -> 10000, the v5 state 1560 -> 5160 (vel 440
+   -> 2797, dhdt 299 -> 1128). Runs into `inverse_v6_<CLIMATE>`.
+   **First v6 attempt from the prior state plunged the velocities and
+   thickened the interior (2026-09-21).** Not an overshoot: at the prior
+   state (beta_init 2.5) slow ice is 1.8x too fast and 435 k cells with the
+   model > 2x too fast on sub-100 m/yr ice carry 75-80 % of the new
+   velocity misfit, the 29 k too-slow outlet cells 3 % (under sigma 141 the
+   slow ice was invisible at r ~ 0.08 and the 4-sigma outlets dominated, so
+   the old runs fixed outlets first). With the Huber saturating at 3 sigma
+   every cell pulls alike, the interior wins by count, and its "more
+   friction" update leaks onto the outlets through the 8 km beta prior
+   (one SGD step: fast ice 0.35 -> 0.22 of observed, slow 1.84 -> 1.53,
+   J down; every data term's d/d log beta is negative on both classes).
+   Reduced steps go the same way, so it is the objective's direction from
+   that state, not the step size. Remedies: (1) WARM-START from the v5
+   checkpoint (`inverse.py WARM_START_PATH`) — from there the level-2
+   mini-run is stable and monotone (slow 1.25 -> 1.19, fast pinned at 0.39
+   by the 4 km grid, which cannot resolve outlets at any state); (2)
+   `sigma_rel_km` (both specs, 5 km): the relative term refers to the local
+   MAXIMUM of the reference field over that radius, so a feature the model
+   places a cell off (or smears on a coarse level) is scored against its
+   own magnitude — cuts the smear share only from 75 to 60 %, so it is a
+   correction, not the fix. Note the dh/dt Huber is now nu = 3 (user).
+   Second finding: under `influence_cap` 0.3 (log transfer) the SMB block
+   does not respond to the tightened dh/dt term at all (pbias in the north
+   frozen at 1.028 over 6 iterations); without caps it moves (-> 1.004 in 5)
+   but the SMB learning rates of 1.0 then oscillate (snow 134 -> 684). The
+   caps were sized for the old gradient scale. Level-2 mini-runs from v5
+   (8-10 iterations, driver mechanics): cap 1.0 on pbias alone or on all
+   four: pbias still frozen (the cap is not the block); no caps + SMB lrs
+   x0.2: 0.003 in 8; lr_z_pbias 5 + cap 1.0: monotone, pbias N -0.0006 per
+   iteration, the northern 1200-2000 m thickening turns over (+7.2 -> +6.6
+   cm/yr by it 9); lr_z_pbias 10 uncapped: oscillates (pbias to 0.02 at
+   outlets, SE 0.79-0.99) — the outlets' dh/dt misfit (still 4-9 sigma) is
+   what the cap keeps out of precipitation. The pbias block is
+   ill-conditioned under the new terms: its interior signal is smooth and
+   weak per cell (|dJ/dz_pbias| 7 against |z| 25), its outlet signal local
+   and huge, and prior-preconditioned SGD with one lr cannot serve both;
+   the log cap suppresses both. CONFIG NOW: `lr_z_pbias=5`, `influence_cap
+   z_pbias 1.0`, and `inverse.py WARM_START_PATH` = the v5 level-0
+   checkpoint. Expect pbias in the north to reach ~0.8 over a 350-iteration
+   run if the rate holds; the real fix is a curvature-aware optimizer in
+   whitened coordinates (Gauss-Newton / L-BFGS keep the prior geometry that
+   Adam's per-coordinate normalization destroys).
+   **`inverse_v6_hybrid` result (warm-started from v5, 2026-09-22;
+   `analysis/output/basin_mb_v6/`)**: the interior velocities are now
+   matched (slow ice 1.14 -> 1.01 of observed) and SMB came down to 366
+   (Mankoff 337; pbias x0.99, precip 729 vs 766 in v5), but discharge fell
+   further, 453 -> 411 (Mankoff 485), so MB WORSENED: -44 (v5 -73, Mankoff
+   -148); windows -60 / -45 vs the products' -148 / -152. The 1200-2000 m
+   thickening persists (+7..+26 cm/yr vs the products). The outlet deficit
+   is MISSING ICE, not slow ice: where the model has ice in 2018 the fast
+   cells run at 0.85-0.98 of observed (inverse and standalone agree to 1 %),
+   but 9 % (300-1000 m/yr), 23 % (1000-3000) and 15 % (> 3000) of the
+   observed fast cells are ICE-FREE in the model, 40-50 % of them observed
+   floating; NE 309 of 333 fast cells (79N / Zachariae), NW 218/1078, CW
+   158/1044 (flux proxy sum |u| H over > 300 m/yr: v1 0.81, v5 0.74, v6
+   0.71). Cause, from the v6 replay's h0 / tf_anom frames: the 1990s
+   thermal-forcing anomaly (+0.68 K at the NE fronts in 1995) times alpha_h
+   (70 m/K) flips the NE margin from -45 to +20 m, the ice fraction there
+   falls 69 -> 23 % and NEVER recovers when dTF returns to 0 (2005: h0 -26,
+   37 %; 2018: 7 %) - a retreat hysteresis; NW / CW flip after 2005 (dTF
+   +0.5-1.1, h0 +24..+84). So the mass-balance gap at the outlets is the
+   calving / TF-phase problem, and the early NE collapse moves discharge
+   OUT of the observed period. The log-beta prior is NOT the lever: a
+   level-0 mini-run with sigma 1.0 (z rescaled to the same physical state;
+   the first test reloaded the whitened z unscaled and started 3x off)
+   raises the loss (2844 -> 3059 in 6 iterations, the effective beta step
+   9x larger) without speeding grounded fast ice. Next: alpha_h / TF
+   smoothing sweep with forward_standalone from the v6 state, scored on ice
+   presence at the observed fast cells in 2018 and the regional MB.
+   **alpha_h 70 -> 100 m/K (same v6 checkpoint, forward_standalone vs
+   forward_standalone_v2; `analysis/output/basin_mb_v6_alphah/`)**: GrIS MB
+   -45 -> -52 (Mankoff -148), D 411 -> 419; 2006-2025 MB -84 -> -106
+   (Mankoff -218), D 399 -> 422 (Mankoff D+BMB 511); windows -60 / -45 ->
+   -75 / -50 (products -148 / -152). All of it is CW (-13 -> -19) and NW
+   (-20 -> -24); NE gets LESS negative (-1 -> +5): its outlets collapse
+   earlier (ice at the observed fast cells 47 % in 1990 vs 78 %) and are
+   gone before the windows. NO also loses more ice (63 vs 77 % in 2018) at
+   no mass-balance gain. SE / CE / SW do not respond (93-98 % either way).
+   The flux proxy stays 0.70-0.73. So alpha_h scales the post-2005 west
+   response ~linearly (+7 Gt/yr for +30 m/K) but worsens the early,
+   hysteretic north / northeast collapse: a larger coefficient cannot fix
+   both, the phase of the 1990s anomaly at NE is the problem.
+
+**Multigrid continuation vs resolution-dependent calving (2026-09-22).**
+Measured, same v6 parameters integrated 1700-2026 at each level (the state
+is NOT carried across levels - every level re-seeds from the observed
+geometry, so only PARAMETERS transfer): 1990-2018 dM/dt -95 (1 km), -81
+(2 km), -79 Gt/yr (4 km); observed outlet cells (>= 1000 m/yr) still
+carrying ice in 2018: 48 / 51 / 55 %. Coarse levels do calve less - box
+averaging shallows the fjord troughs (depth = -bed) and thickens the front
+cell, both of which raise H_calve's margin - but the bias is ~16 Gt/yr
+(~4 % of SMB) and its SIGN is opposite to the mass-balance deficit: a
+coarse level retains MORE ice, so it asks the SMB block for MORE ablation,
+not less. SMB itself is resolution-independent (computed on the fine grid,
+restricted inside the checkpoint). Where the coarse levels DO damage the
+fit is beta at the outlets: over the v6 run (warm-started from v5 L0), the
+level-2 stage moved log beta at > 1000 m/yr cells by std 2.13 (a factor of
+8) and only 47 % of that change survives the L1 + L0 stages (fast 300-1000:
+46 %), while in the interior 84 % survives (std 0.92) - i.e. the two fine
+stages spend their budget undoing level 2 at the margins. Cause: at 4 km
+the model CANNOT represent outlets (fast-ice ratio pinned at 0.39 of
+observed at every state tried), so the velocity residual there is
+discretization error and the optimizer converts it into beta. Fix in the
+likelihood, not the schedule: make `sigma_rel` (VelocitySpec, DhdtSpec)
+LEVEL-DEPENDENT - e.g. 0.05 / 0.25 / 0.5 at L0 / L1 / L2 - so a coarse
+level is told it cannot know a 2 km outlet channel; the observation already
+sees `state.level` at loss time, so this is a small change. Freezing beta
+near the margins at coarse levels is the blunter alternative.
+
+13. `config.climatology_only` (2026-09-22; default False = the Alaska
+   behaviour): hold the ATMOSPHERE at the reference climate for the whole
+   run - the monthly climatology in the gridded inputs plus the calibrated
+   tbias / pbias, with no yearly fields (the 9.3 GB record is not even
+   loaded), no temperature-anomaly index (`base_anomaly` and `alpha_t2m`
+   forced to 0) and no precipitation anomaly, AND the ocean at its TF
+   climatology (`OceanForcing(freeze_anomaly=True)` -> `anomaly()` returns
+   0, so q / h0 are the time-invariant baseline + clim_* (TF_clim -
+   tf_crit); the climatology is still read, only the interannual departure
+   is dropped) - the thermal forcing moves mass through the margins on the
+   same order as the atmosphere does through SMB, so a spin-up adequacy
+   test has to hold both. Gated in
+   `problem.simulate_physical` (one ternary per forcing argument) and in
+   `forward_standalone.setup` (`alpha_t2m_eff` / `base_anomaly_eff`, yearly
+   loader skipped) and in both `OceanForcing.from_file` call sites, so an
+   inversion, a replay and a diagnostic run all see the same forcing;
+   `GlacierProblem` and `OceanForcing.describe()` both announce it.
+   Purpose: with the
+   climate fixed, the model's dh/dt IS its relaxation from the initial
+   geometry, which separates the spin-up transient from the forced response
+   in the dh/dt misfit (measured drift at the v6 state: +110 Gt/yr over
+   1900-1990, against -95 Gt/yr over 1990-2018 - the same order as the
+   signal). The intended remedy for a large drift is a LONGER SPIN-UP, not
+   a shorter one or a later start: the initial condition is unknown and an
+   observed geometry is not in the space of admissible model states, so it
+   injects a numerical transient; a model that cannot hindcast 2000 from
+   1900 freely has no claim on 2100 from 2000.
+
+14. `config.interannual_sigma` / `interannual_nodes` (2026-09-22; None =
+   the Alaska behaviour): Gauss-Hermite quadrature over the interannual
+   variance the SCALAR index terms do not carry, in
+   `forward._expand_interannual`. smb is concave in temperature, so a step
+   evaluated at its MEAN anomaly is not its mean smb; the gap is
+   ~ curvature sigma^2 / 2, and Greenland's integrated curvature is
+   ~-160 Gt/yr/K^2. **Validated independently**: with sigma_true 1.055 K
+   (measured ice-mean JJA interannual std of the hybrid yearly file; annual
+   1.023) and the index's effective 0.6 K, 0.5 curv (1.055^2 - 0.6^2) =
+   -60 Gt/yr against the -62 the OCX experiment measured between the index
+   and the resolved yearly fields at identical MEAN forcing. A deep step
+   resolves none of it, so there the correction is 0.5 curv 1.055^2 =
+   -89 Gt/yr (the code returns -88.2 on a quadratic). Mechanics: each scalar
+   term `(a, w)` becomes `(a + s x_i, w w_i)` over the probabilists'
+   Gauss-Hermite rule (3 nodes at 0, +-sqrt(3), weights 2/3, 1/6, 1/6 --
+   exact through 5th order), with `s^2 = sigma^2 - <the variance the terms
+   already carry>`. That residual is what makes ONE setting right for every
+   epoch: under `mean_anomaly` a single term carries no spread and takes the
+   full sigma, under `annual` the spread across the step's index years counts
+   against it, and a step already spreading wider than sigma is returned
+   untouched. `sigma` is in the units the terms carry, i.e. AFTER alpha_t2m.
+   YearField terms are never touched, so this acts on exactly the
+   pre-reanalysis spin-up. Like `temp_dev` one level up it is a FIXED
+   deterministic quadrature, not a random draw, so the checkpointed backward
+   reproduces the forward. NOT gated on `climatology_only` (the variance
+   belongs to the climate, not the anomaly: a drift diagnostic without it
+   would sit ~90 Gt/yr above the calibration and report the offset as
+   drift). `forward_standalone.py` applies the identical nodes. Cost is
+   `interannual_nodes` glare calls per index term and nothing on the
+   dynamics: for the Greenland schedule (dt 50 to 1850, 10 yr to 1990, then
+   the record) ~49 index steps, so ~100 extra calls per run. Greenland sets
+   `interannual_sigma=1.05`, `interannual_nodes=3`. Verified offline
+   (weights, mean and total std exact; record terms preserved; both off
+   switches; quadratic recovery exact); NOT yet run on the GPU.
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
@@ -426,9 +670,109 @@ pbias UP 8 % (precip 944 Gt/yr vs CARRA2 raw 911, RCMs ~750). Cause: the
 default `two_sided=False` scores only "snow observed, model bare", so with a
 fractional label nothing resists snow below the snowline and raising precip
 is free. The config is on `two_sided=True` since 2026-09-19 (the product
-classifies both sides on the main sheet; not yet rerun). Expect SMB ~470 Gt/yr at the label's bare-ice area by
-interpolation — the remaining ~130 Gt/yr over Mankoff is CARRA2's precip
-excess, which then has to come out of pbias against dh/dt.
+classifies both sides on the main sheet).
+**`inverse_v3` (two-sided, 2026-09-19; `analysis/output/basin_mb_v3/`,
+`analysis/smb_diagnostics.py` prints all of this per run)**: the snowline is
+matched (bare ice 179 k vs 169 k km2, P(snow) within 0.02-0.07 of the label
+in every band, mean bias -0.007) and the interannual SMB stays good (std 132
+vs 110, slope 1.15, dSMB/dT_jja -89 vs -80, r 0.96, trend -29 vs -27
+Gt/yr/decade). SMB mean 458 (Mankoff 337; v1 307), D 517 (485), MB -58
+(-148). The state UNDERFITS ITS OWN dh/dt DATA: integrated over the basins
+the products give -148 (ITS_LIVE 1993-2019) and -152 Gt/yr (ATL15
+2019-2026), v1 had -179 / -127, v3 has -78 / -50 (v2 -58 / -17); the excess
+is thin and interior (1400-2000 m +147 vs v1 +69 Gt/yr, > 2000 m +412 vs
++368; pbias x1.07-1.08 above 1400 m, precip 928 vs CARRA2 raw 911, RCMs
+~750; north worst: NO+NE SMB 58 vs Mankoff 8). Why the loss allows it:
+90 Gt/yr over the ice sheet is ~0.05-0.1 m/yr of dh/dt, a long-wavelength
+offset that a per-pixel sigma 0.5 m/yr likelihood with a 10 km Matern
+correlation barely sees, while the snowline term is 1.8 M cells at sigma_p
+0.3. v1 only had the right total because its ELA was wrong in the
+compensating direction. To do: a basin-integrated mass-change term (the
+same dh/dt products summed per Mouginot region and window, sigma ~5-10 Gt/yr
+per region for the altimetry's systematic error; `record_volumes_at`
+already emits volumes) so the long-wavelength budget is weighted as what it
+is. The interior pbias excess was the SNOWLINE TERM ITSELF, not the
+geometry: with s_smb 0.5 m/yr the logistic cannot saturate on SMB 0.1-0.5
+m/yr (P ~0.7 at label 1.00), so 63 % of the Brier sum and ~3/4 of the upward
+pull on SMB came from above 2000 m, where only precipitation can answer.
+**Rerun with `s_smb=0.1`, `sigma_p=0.5` (2026-09-20, written INTO
+`inverse_v3`; the s_smb 0.5 forward run is kept as
+`inverse_v3/forward_standalone_ssmb05` + `physical_fields_ssmb05.nc`,
+`analysis/output/basin_mb_v3b/`)**: snowline fit unchanged (bare ice 183 k
+vs 169 k, bias -0.009), pbias back to x1.00 above 2000 m (x1.02 overall,
+precip 894 vs 928 Gt/yr), SMB 413 (was 458; Mankoff 337), D 495 (517;
+485), MB -81 (-58; -148); windows -104 / -70 Gt/yr against the products'
+-148 / -152. Interannual: std 135, slope 1.18, dSMB/dT_jja -94 vs -80 (a
+little hotter than with s 0.5; 2019 bare ice 371 k vs 224 k). Remaining
+excess ~75 Gt/yr: NO+NE SMB 55 vs Mankoff 8, CW+NW +30; the dry north still
+sits within ~1 s_smb of zero, so `make_snowline.py --zone-km` (support
+restricted to the snowline's neighbourhood; `gridded_snowline_zone20.nc` is
+built, 600 k of 1.8 M cells) and the basin-integrated mass-change term are
+the next two levers — superseded for the snowline part by the hinge
+likelihood (library change 11; the config runs it into `inverse_v4`, the
+zone file stays unused: modify the likelihood, not the product).
+`forward_standalone.py` now re-exports
+`physical_fields.nc` when the checkpoint is newer (it silently replayed
+the previous state after a rerun into the same results_subdir).
+
+**Reanalysis switch (2026-09-20): `CLIMATE = "carra2" | "racmo"` at the top
+of `domains/greenland/config.py`.** No library change: the two forcings are
+twin input files selected by name (`gridded_filename`,
+`yearly_climate_filename`), and `results_subdir` is `inverse_v5_<CLIMATE>`.
+`preprocessing/make_racmo_vars.py` builds `gridded_climate_racmo.nc` and
+`GLIDE_inputs_racmo.nc` (= GLIDE_inputs.nc with `monthly_t2m` /
+`monthly_precip` replaced by the RACMO2.3p2-ERA5 1986-2025 climatology - the
+CARRA2 window, so the Vinther index keeps its zero-mean reference);
+`make_climate_yearly.py --source racmo` builds
+`gridded_climate_yearly_racmo.nc` (1958-2025, 68 years, 15.8 GB of int16
+codes; anomalies exactly zero-mean over 1986-2025, 0 capped ratios). RACMO is
+on the domain grid (y flipped, coordinates asserted) and covers 100 % of the
+main sheet but 66 % of the peripheral ice and 58 % of the domain mask:
+outside the footprint the climatology is CARRA2's field + the nearest
+covered cell's RACMO - CARRA2 offset (precip: ratio; `racmo_fill_distance`
+in km), yearly anomalies are the nearest covered cell's. `tas` is the 2 M
+temperature, not the 100 m level of the CARRA2 forcing (pinned near 0 degC
+over melting ice), so H_atm / tbias will recalibrate - part of what the
+experiment measures. Main sheet, 1986-2025: precip 714 vs CARRA2 824 Gt/yr
+(x0.93 below 1200 m, x0.86 at 1200-2000 m, x0.85 above), JJA -6.73 vs
+-5.59 degC (annual -19.59 vs -16.09): the precip gap alone is the size of
+inverse_v4's SMB excess over Mankoff. Level-2 check 1950-2026: fwd + loss +
+bwd 14 s, 11.2 GB peak VRAM, the 68-year record pinned in host RAM
+(`yearly_climate_cache="none"` reads it from the page cache instead).
+`forward_standalone.py` follows `config.gridded_filename`, so the forward
+run after the inversion uses the same forcing. Not yet run.
+**`CLIMATE = "hybrid"` (the config's setting since 2026-09-20): CARRA2
+temperature + RACMO precipitation**, `preprocessing/make_climate_hybrid.py`
+-> `GLIDE_inputs_hybrid.nc` (GLIDE_inputs with `monthly_precip` from the
+RACMO file) and `gridded_climate_yearly_hybrid.nc` (9.3 GB, 1986-2025: the
+CARRA2 file's `t2m_anom` codes + the RACMO file's `precip_ratio` codes, both
+relative to their own 1986-2025 climatology with the same scale factors, so
+a pure copy). This is the CONTROLLED experiment: against inverse_v4 only the
+precipitation differs - melt physics, the 100 m temperature level and
+glare's rain/snow split stay on CARRA2, whereas "racmo" also swaps in the
+2 m temperature. The mix keeps the T-P covariance because both products
+are ERA5-bounded: ice-mean annual precip ratios correlate at r = 0.97 over
+the 40 years (std 0.095 vs 0.087). Level-2 check 1980-2026: 12 s, 7.3 GB.
+Results go to `inverse_v5_hybrid`; compare with `v4_hinge`.
+**Result (`inverse_v5_hybrid`, 2026-09-20; `analysis/output/basin_mb_v5/`)**,
+v4 -> v5 (Mankoff): SMB 453 -> 380 (337), D 512 -> 453 (485), MB -58 -> -73
+(-148); windows -81 / -46 -> -102 / -60 (products -148 / -152). The melt
+side did not move (tbias -0.36 -> -0.41 K, H_atm 13.3 -> 13.2, f_clear 0.41,
+pbias x0.99, snowline bias -0.002, bare ice 172 k vs 171 k km2), so the
+experiment is clean, and the interannual SMB is the best yet (std 117 vs
+110, slope on Mankoff 1.01, dSMB/dT_jja -83 vs -80, r 0.95). Two readings:
+(1) ~2/3 of v4's SMB excess over Mankoff (73 of 116 Gt/yr) WAS the choice of
+reanalysis; interior SMB above 2000 m 0.32 m/yr (v4 0.41, SDBN1 0.37 / 0.28).
+The remaining +43 is a regional dipole, not a uniform offset: NO 17 vs -2,
+NE 35 vs 10, SW 33 vs 15, CW 69 vs 47 too high (+88) against SE 104 vs 132
+and CE 60 vs 78 too LOW (-46) - RACMO's SE precipitation is below the
+three-RCM mean Mankoff uses. (2) The MASS BALANCE barely moved: taking 73
+Gt/yr out of the accumulation took 59 out of the discharge (now BELOW
+Mankoff's), because the inversion balances D against whatever SMB it is
+given - the ice-sheet-wide dh/dt signal is too weakly weighted to hold the
+budget (-73 vs -148). So the MB deficit is not a forcing problem: the
+basin-integrated mass-change term is what it needs. Also: yearly bare-ice
+area still too variable (std 77 k vs 30 k, 2019 425 k vs 226 k, r 0.40).
 
 **ISMIP7 projections (2026-09-16): `forward_projection.py` +
 `preprocessing/make_ismip7_forcing.py`.** The projection driver imports
@@ -524,8 +868,45 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   the default when `climate/temp_anomaly/swgreenlandave.dat` exists): JJA mean
   anomaly 1784-2013, extended to 2025 with the CARRA2 100 m temperature over the
   SW basin (regressed on the stations over 1986-2013: slope 0.77, r 0.83), zero
-  mean over the CARRA2 climatology years, gaps interpolated, constant before
-  1784. The configs use `base_anomaly_year=None` and `alpha_t2m=0.6`: RACMO
+  mean over the CARRA2 climatology years, gaps interpolated.
+  **Before the stations the series is GISP2 (2026-09-22)**, not a constant:
+  `--deep-source gisp2` (the default when
+  `climate/temp_anomaly/gisp2-temperature2011.txt` is present; `none` restores
+  the old flat hold) scales the Kobashi et al. (2011) Summit argon-nitrogen
+  temperature onto the station series and crossfades it over 1784-1840. One
+  variance-matched slope over the 1784-1950 overlap, both sides low-passed at
+  `--deep-smooth` (31 yr): the gas thermometer integrates the firn temperature
+  gradient, so its annual increments are 0.085 K against a record std of
+  0.98 K and it resolves only multi-decadal variability. Variance matching,
+  NOT least squares -- OLS attenuates by r and would return too warm an LIA,
+  and it is the forcing AMPLITUDE the model consumes. slope 1.16 (11 yr,
+  r 0.58) / 1.12 (31, 0.76) / 1.06 (51, 0.90) / 0.95 (101, 0.97); the decline
+  as the filter loosens is residual firn attenuation, and bandwidths leaving
+  fewer than three independent samples are refused. The choice barely
+  matters: over s = 1.06-1.16 the Common Era index moves only -0.54..-0.46 K
+  because the anchor is a measured station mean and the Common Era sits
+  ~0.6 K from it. Resulting epoch means (K vs the CARRA2 window):
+  Common Era -0.51, Roman (1-500) 0.00, Medieval (900-1200) -0.35, LIA
+  (1450-1850) -1.47, LIA core (1600-1800) -1.77; the old flat hold was
+  -1.20 K for EVERY pre-1785 year. Blend window = exactly where the stations
+  are mostly interpolated (9/16 of 1784-99, 8/20 of 1800-19, 19/20 of
+  1820-39 missing; continuous from 1840), so it replaces a 19-year linear
+  interpolation rather than discarding observations. The published file
+  carries a 2.75 K step at 1730 BCE (plus 1.08 K the next year) with
+  everything older ~3 K colder -- a section boundary in the DT integration,
+  not climate -- so `DEEP_RECORD_START` drops everything before 1000 BCE and
+  a `DEEP_MAX_STEP` check warns about anything that abrupt surviving inside
+  the used range. The time axis now runs -1000..2025 (`forward.simulate`
+  looks the anomaly up by year in a dict and clips only at the top, so a step
+  before the first year would raise rather than saturate). 1840-2025 is
+  bit-identical to the pre-GISP2 file. **Impact scales with how deep the
+  spin-up goes** (alpha_t2m 0.6, dSMB/dT_jja -83 Gt/yr/K): t_start 1700
+  +44 Gt/yr and +2 m of ice-sheet-mean thickness over the spin-up (the old
+  hold was too WARM for 1700-1784, the LIA core), t_start 1000 -13 Gt/yr and
+  -7 m, t_start 0 -38 Gt/yr and -44 m, t_start -1000 -46 Gt/yr and -82 m. So
+  it is inert for the current configuration and first-order exactly when the
+  spin-up is lengthened.
+  The configs use `base_anomaly_year=None` and `alpha_t2m=0.6`: RACMO
   tas JJA regressed on the Vinther JJA series gives 0.58 ice-sheet mean
   (0.51 CE .. 0.70 SW, r 0.6-0.8, and the fit is stable across halves of
   the record), whereas HadCRUT explains almost nothing of
@@ -533,6 +914,49 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   and 1970s-90s cool periods are absent from a global series). The global
   PAGES2k+HadCRUT splice remains available as `--source global` (then
   `alpha_t2m` ~1.3-2 and a base year are needed).
+- **Precipitation follows the same index (2026-09-22)**, where before it did
+  not: `make_precip_anomaly.py` was an inert placeholder waiting on an
+  accumulation-reconstruction CSV that is not on disk, so no
+  `precip_anomaly.nc` existed, `alpha_precip` stayed 0 and
+  `forward.simulate` set `precip_multiplier = 1` — accumulation sat at the
+  modern climatology through the whole spin-up while only the temperature
+  half of a colder past was applied. The script now falls back to scaling the
+  index, `R(t) = exp(gamma_ann * dTann_dindex * I(t))` normalized to 1 at
+  `base_precip_year`, and the config sets `alpha_precip=1.0`,
+  `base_precip_year=2006`. NO library change: this is the Alaska
+  `precip_anomaly` pathway, and `_term_forcing` applies the multiplier to
+  INDEX years only (record years take `precip_ * yearly.precip_ratio(year)`),
+  so it cannot double-count with the reanalysis forcing. `alpha_precip`
+  multiplies gamma to first order (1 + a(e^x - 1) ~ e^{ax}), so sweep it from
+  the config instead of rebuilding. The CSV path still takes precedence when
+  the file appears, with years outside its span filled from the index scaling
+  rescaled to the reconstruction's own mean (a dict lookup below the series
+  would raise, and a constant would reintroduce the flat-hold bias).
+  **gamma is a PRIOR, not a fit**: `--measure` regresses the ice-sheet
+  precipitation-weighted annual ratio on temperature over 1986-2025 (hybrid)
+  and gets +2.3 +- 1.2 %/K on ice annual T (r 0.31), +1.3 +- 1.4 on the
+  index, -0.2 +- 1.2 on JJA — all indistinguishable from zero, because
+  interannual Greenland precipitation is circulation-driven, exactly as
+  Kapsner et al. (1995) found for Holocene GISP2 accumulation while
+  glacial-interglacial accumulation tracks temperature. Fitting that slope
+  would silently switch the response off. The default 5 %/K is the modelling
+  convention, below the Clausius-Clapeyron ceiling (7.3 %/K at 273 K, 9.6 at
+  253 K, a saturation bound not a precipitation sensitivity) and matches the
+  3-5 %/K from ice-core accumulation across the glacial transition; the
+  40-yr record neither supports nor excludes it. `dTann_dindex` = 0.73
+  (measured, r 0.66; JJA 0.92, r 0.80 against `alpha_t2m` 0.6), so 5 %/K of
+  ice annual T is 3.65 %/K of index. Epoch multipliers and the ice-sheet
+  cost at 814 Gt/yr: Common Era x0.984 (-13 Gt/yr), Roman x1.002 (+2),
+  Medieval x0.990 (-9), LIA x0.950 (-41), LIA core x0.940 (-49). Mean over
+  the index years (t_start..1985) at 5 %/K: t_start 1700 -43 Gt/yr, 1000
+  -29, 100 -17, 0 -15, -1000 -10. Unlike the temperature record this bites
+  at SHALLOW starts too, because 1700-1985 sits in the Little Ice Age.
+  `forward_standalone.py` applies the same multiplier (`alpha_precip_eff`,
+  `smb_index(shift, precip_multiplier)`, the identical weighted-mean-over-
+  index-years / base_precip arithmetic, zeroed by `climatology_only`), so
+  replays and `forward_projection --pre-record standalone` stay consistent
+  with the inversion — without it a replay would run wetter than the
+  inversion everywhere before 1986.
 - **Climate forcing is CARRA2 at height levels, not 2 m** (`make_carra_vars.py`):
   the 100 m above-ground temperature is the forcing air temperature (the 2 m
   field already carries the melt-depleted boundary layer), moved onto the DEM
@@ -669,6 +1093,45 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   variable request (github.com/ismip) before submitting.
 
 ## Known gaps / follow-ups
+
+- **Spin-up length: what is actually needed (2026-09-22).** The point of the
+  `climatology_only` run is NOT to reach a steady state, it is to find how
+  long an integration makes the unknown initial condition stop mattering.
+  Linearizing, dH(T) = e^{AT} dH(0) + [int e^{A(T-s)}] B dtheta, so the SMB
+  signal in the final surface over the surviving IC error is
+  R(T) = tau (e^{T/tau} - 1): linear in T while T << tau, exponential after.
+  MEASURED (user, 2000-yr constant-climate run from an optimized state): the
+  northern dh/dt halves every 500-700 yr, i.e. tau ~ 700-1000 yr, and faster
+  further south. That is NOT the Nye volume time H/adot (11,500 yr for NE),
+  which answers a different question (approach to a new equilibrium VOLUME
+  after a forcing change). An IC inconsistency is a thickness perturbation at
+  FIXED forcing and relaxes diffusively: the fundamental mode is
+  L^2/(pi^2 D) with D = 3q/alpha, i.e. H/(3 pi^2 adot) = the Nye time / 29.6
+  = 389 yr for NE, and sliding (less slope-sensitive flux, smaller D) lifts
+  it to the measured value. Numerical diffusion is NOT the cause: upwind
+  u dx/2 and implicit u^2 dt/2 give 1e4-1e5 m2/yr against a physical D of
+  4.2e7. Consequence: 2000 yr leaves under 10 % of the IC error anywhere,
+  3000 yr under 3 % in the north, and that is inside the window where holding
+  the modern reference climate is defensible -- paleo forcing is a refinement,
+  not a prerequisite. Cost is ~2.5x the current 326-yr window at a 20-yr
+  spin-up step, less with a 50-yr deep step. Watch for outlets that survive a
+  326-yr spin-up but not a 2000-yr one: that is information about
+  `calving_h0` / `clim_h`, not an artefact to suppress.
+- **All three spin-up biases are now addressed (2026-09-22), none yet run.**
+  They were one-signed -- every one made the spin-up too positive -- and
+  negligible at a 326-yr window but first-order at the 2000-3000 yr the
+  relaxation-time measurement calls for. Sizes at t_start 0, as an
+  ice-sheet-mean rate and as the steady offset rate x tau with tau ~850 yr:
+  the pre-instrumental temperature hold +38 Gt/yr (+21 m, GISP2 deep
+  extension), flat precipitation +15 Gt/yr (+8 m, `alpha_precip` +
+  `make_precip_anomaly.py`), and the step-mean variance suppression
+  +90 Gt/yr (+49 m, library change 14) -- the largest by far. Together ~143
+  Gt/yr, or ~78 m of ice-sheet-mean thickness, against the IC error the
+  longer spin-up is meant to shed. FIRST THING TO CHECK on the next deep
+  run: the three corrections all reduce SMB, so the calibrated pbias / tbias
+  should move the other way from v6, and the drift measured under
+  `climatology_only` should now be comparable between the spin-up and the
+  1986-2025 window instead of offset by ~90 Gt/yr.
 
 - **Projection elevation feedback (done 2026-09-17, temperature only)**:
   `forward_projection.py` adds `FEEDBACK_LAPSE(month) * (S_model(t) - S_ref)`

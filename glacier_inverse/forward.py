@@ -9,9 +9,11 @@ Used identically by inverse, rto_sample, and sensitivity.
 """
 import math
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Optional, Sequence
 
 import cupy as cp
+import numpy as np
 import torch
 from torch.nn.functional import avg_pool2d, max_pool2d, interpolate
 from torch.utils.checkpoint import checkpoint
@@ -68,6 +70,68 @@ class YearField:
 
     def __repr__(self):
         return f"YearField({self.year})"
+
+
+@lru_cache(maxsize=8)
+def _hermite_nodes(n: int):
+    """Probabilists' Gauss-Hermite rule: (nodes, weights) with sum(w) = 1, so
+    sum_i w_i f(x_i) ~ E[f(Z)] for Z ~ N(0, 1), exact for polynomials up to
+    degree 2n - 1."""
+    x, w = np.polynomial.hermite_e.hermegauss(int(n))
+    return tuple(float(v) for v in x), tuple(float(v) for v in w / np.sqrt(2.0 * np.pi))
+
+
+def _expand_interannual(terms, sigma, n_nodes):
+    """Replace each SCALAR anomaly term by a Gauss-Hermite fan, so the step's
+    forcing carries total interannual variance `sigma**2` instead of only the
+    spread the index terms happen to resolve.
+
+    Why: SMB is concave in temperature (Greenland ~ -160 Gt/yr/K^2 integrated),
+    so evaluating it at a step's MEAN anomaly is not its mean over the step --
+    E[smb(T)] < smb(E[T]) by ~ curvature sigma^2 / 2. The reanalysis years
+    escape this because each is its own term with its own fields, but an index
+    year does not: under `mean_anomaly` a 50-yr spin-up step is ONE evaluation
+    at the 50-year mean, and before 1784 the index is a multi-decadally
+    smoothed core record that carries almost no interannual variance to begin
+    with. The result is a spin-up systematically too positive, on the order of
+    curvature sigma^2 / 2 ~ 90 Gt/yr for Greenland, while the calibration
+    window after 1986 has no such bias -- an inconsistency between the two
+    halves of the same run that grows with the spin-up length.
+
+    The correction is the same device `temp_dev` already uses for
+    within-month weather: a fixed, deterministic quadrature over the missing
+    variance rather than a random draw, so the checkpointed backward
+    recomputes the identical forward. Three nodes integrate a Gaussian exactly
+    through fifth order, which is ample for a response whose aggregate
+    curvature is quadratic; per cell the melt hinge is only approximated, but
+    cells far from their threshold contribute no curvature either way.
+
+    `sigma` is the TOTAL interannual std of the forcing temperature in the
+    units the terms carry, i.e. after alpha_t2m. The variance the terms
+    already carry is subtracted, so the same setting is right for every
+    epoch: under `mean_anomaly` one term carries none and the full sigma is
+    applied, under `annual` the spread across the step's index years counts
+    against it, and a step whose terms already spread wider than `sigma` is
+    left alone. YearField terms are never touched -- record years carry real
+    weather.
+    """
+    scalars = [(a, w) for a, w in terms if not isinstance(a, YearField)]
+    if not scalars or sigma is None or sigma <= 0 or n_nodes < 2:
+        return terms
+    wsum = sum(w for _, w in scalars)
+    if wsum <= 0:
+        return terms
+    mean = sum(float(a) * w for a, w in scalars) / wsum
+    carried = sum(w * (float(a) - mean) ** 2 for a, w in scalars) / wsum
+    resid = sigma * sigma - carried
+    if resid <= 0:
+        return terms
+    s = math.sqrt(resid)
+    x, wq = _hermite_nodes(n_nodes)
+    out = [t for t in terms if isinstance(t[0], YearField)]
+    for a, w in scalars:
+        out.extend((a + s * xi, w * wi) for xi, wi in zip(x, wq))
+    return tuple(out)
 
 
 def _term_forcing(a, tbias, base_anomaly, precip_step, precip_, yearly):
@@ -435,6 +499,8 @@ def simulate(
     ocean_forcing=None,
     dt_schedule=(),
     yearly_climate=None,
+    interannual_sigma: Optional[float] = None,
+    interannual_nodes: int = 3,
 ) -> SimResult:
     """Run the forward model on coarse `level` over a snapped step sequence.
 
@@ -602,6 +668,13 @@ def simulate(
                     merged[a] = merged.get(a, 0.0) + w
                 anomaly_terms = field_terms + tuple(
                     (alpha_t2m * a, w * w_index) for a, w in merged.items())
+
+        # Restore the interannual variance the scalar index terms do not carry
+        # (see _expand_interannual). Record years are untouched, so this acts
+        # only on the pre-reanalysis spin-up.
+        if interannual_sigma:
+            anomaly_terms = _expand_interannual(
+                anomaly_terms, interannual_sigma, interannual_nodes)
 
         if p_anom is not None:
             if anomaly_integration == "end":

@@ -95,7 +95,7 @@ class _LazyYears:
 
 class OceanForcing:
     def __init__(self, cfg: OceanForcingConfig, *, years: np.ndarray, stat, dist: np.ndarray,
-                 q0: float, h00: float, source: str = ""):
+                 q0: float, h00: float, source: str = "", freeze_anomaly: bool = False):
         if cfg.statistic not in ("max", "mean"):
             raise ValueError(f"OceanForcingConfig.statistic must be 'max' or 'mean', got {cfg.statistic!r}")
         self.cfg = cfg
@@ -104,6 +104,12 @@ class OceanForcing:
         self.stat = stat if isinstance(stat, _LazyYears) else np.asarray(stat, dtype=np.float32)
         self.q0, self.h00 = float(q0), float(h00)
         self.source = source
+        # config.climatology_only: hold the ocean at its reference climate,
+        # dTF == 0 for every step, so the margins are the time-invariant
+        # q0 + clim_q (TF_clim - tf_crit) / h00 + clim_h (TF_clim - tf_crit).
+        # The TF climatology itself is still read and still shapes the
+        # margins' geography - only the interannual departure is removed.
+        self.freeze_anomaly = bool(freeze_anomaly)
         y0, y1 = cfg.ref_years
         sel = (self.years >= y0) & (self.years <= y1)
         if not sel.any():
@@ -121,7 +127,8 @@ class OceanForcing:
 
     @classmethod
     def from_file(cls, path, crop_factor: int, cfg: OceanForcingConfig, *,
-                  q0: float, h00: float, lazy: bool = False) -> "OceanForcing":
+                  q0: float, h00: float, lazy: bool = False,
+                  freeze_anomaly: bool = False) -> "OceanForcing":
         """Load only the needed annual statistic from thermal_forcing.nc,
         cropped like GLIDE_inputs. Dense (the file is closed before
         returning) or, with `lazy`, read year by year from the file kept
@@ -138,7 +145,8 @@ class OceanForcing:
         finally:
             if not lazy:
                 f.close()
-        of = cls(cfg, years=years, stat=stat, dist=dist, q0=q0, h00=h00, source=source)
+        of = cls(cfg, years=years, stat=stat, dist=dist, q0=q0, h00=h00, source=source,
+                 freeze_anomaly=freeze_anomaly)
         of._file = f if lazy else None
         return of
 
@@ -151,11 +159,15 @@ class OceanForcing:
         return (f"ocean forcing: TF {self.years[0]}-{self.years[-1]} (tf_{c.statistic}), "
                 f"climatology {c.ref_years}, tf_crit {c.tf_crit:g} degC, {int(self.ok.sum())} active cells within {c.max_dist_km:g} km; "
                 f"q = {self.q0:g} + {c.clim_q:g}/K * (TF_clim - tf_crit) + {c.alpha_q:g}/K * dTF in {c.q_bounds}, "
-                f"h0 = {self.h00:g} + {c.clim_h:g} m/K * (TF_clim - tf_crit) + {c.alpha_h:g} m/K * dTF in {c.h0_bounds}")
+                f"h0 = {self.h00:g} + {c.clim_h:g} m/K * (TF_clim - tf_crit) + {c.alpha_h:g} m/K * dTF in {c.h0_bounds}"
+                + ("; CLIMATOLOGY MODE: dTF held at 0, the margins are time-invariant"
+                   if self.freeze_anomaly else ""))
 
     def anomaly(self, t0: float, t1: float) -> np.ndarray:
         """dTF(x) = TF_step - TF_clim for the step (t0, t1] on the fine grid;
         0 where inactive and before the record."""
+        if self.freeze_anomaly:
+            return self._zero
         years, stat = self.years, self.stat
         ya, yb = int(years[0]), int(years[-1])
         overlap = [(min(y, yb), w) for y, w in year_overlap_weights(t0, t1) if y >= ya]

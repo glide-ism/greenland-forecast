@@ -99,14 +99,15 @@ def year_fraction(polys, x, y, ice_fraction):
 
 
 def build_snowline(domain_path: str, snowline_dir: str = None, years=None,
-                   unclassified_km: float = UNCLASSIFIED_KM) -> xr.Dataset:
+                   unclassified_km: float = UNCLASSIFIED_KM, zone_km: float = None,
+                   out_path: str = None) -> xr.Dataset:
     domain_path = Path(domain_path)
     snowline_dir = Path(snowline_dir) if snowline_dir else SNOWLINE_DIR
     files = snowline_files(snowline_dir, years)
     if not files:
         raise RuntimeError(f'no <year>_snowline.zip in {snowline_dir}')
     dem = xr.load_dataset(domain_path / 'model_inputs' / 'gridded_dem.nc')
-    output_path = domain_path / 'model_inputs' / 'gridded_snowline.nc'
+    output_path = Path(out_path) if out_path else domain_path / 'model_inputs' / 'gridded_snowline.nc'
     x, y = dem.x.values.astype('float64'), dem.y.values.astype('float64')
     dx = float(abs(x[1] - x[0]))
     ice_fraction = dem.ice_fraction.values.astype('float32')
@@ -142,6 +143,21 @@ def build_snowline(domain_path: str, snowline_dir: str = None, years=None,
     unclassified[yy[d > unclassified_km * 1e3], xx[d > unclassified_km * 1e3]] = True
     glacier_fraction = np.where(unclassified, 0.0, ice_fraction).astype('float32')
 
+    # Optional support restriction to the snowline's neighbourhood: cells
+    # within zone_km of any cell whose label is unsaturated (the snowline was
+    # there in some season). Elsewhere the label is 0 or 1 in every year and
+    # says nothing about the ELA, but the term's logistic never saturates in
+    # the dry interior (SMB 0.1-0.5 m/yr against s_smb: P stays ~0.7 at label
+    # 1), so 1 M interior cells pull SMB — i.e. precipitation — up
+    # (inverse_v3: 63 % of the Brier sum above 2000 m, pbias x1.08 there).
+    zone = None
+    if zone_km is not None:
+        from scipy import ndimage
+        mean_label = total / n
+        active = ice & ~unclassified & (mean_label > 0.02) & (mean_label < 0.98)
+        zone = ndimage.distance_transform_edt(~active) * dx <= zone_km * 1e3
+        glacier_fraction = np.where(zone, glacier_fraction, 0.0).astype('float32')
+
     t0, t1 = float(yrs[0]), float(yrs[-1])
     time_attrs = dict(time_nominal=0.5 * (t0 + t1), time_start=t0, time_end=t1)
     snow_fraction = np.where(ice & ~unclassified, total / n, np.nan).astype('float32')
@@ -157,6 +173,9 @@ def build_snowline(domain_path: str, snowline_dir: str = None, years=None,
     out['spatial_ref'] = dem['spatial_ref']
     for v in ('snow_fraction', 'glacier_fraction', 'snow_label'):
         out[v].attrs['grid_mapping'] = 'spatial_ref'
+    if zone is not None:
+        out.attrs['zone_km'] = zone_km
+        out.attrs['zone_cells'] = int((zone & ice & ~unclassified).sum())
     out.attrs.update(snowline_source=str(snowline_dir.resolve()), product_crs=PRODUCT_CRS, n_years=n,
                      unclassified_periphery_cells=int(unclassified.sum()), unclassified_km=unclassified_km,
                      method='make_snowline.py: ring nesting depth rasterized at 500 m (snow = odd depth), '
@@ -175,5 +194,8 @@ if __name__ == '__main__':
     ap.add_argument('--snowline-dir', default=str(SNOWLINE_DIR))
     ap.add_argument('--years', type=int, nargs=2, default=None)
     ap.add_argument('--unclassified-km', type=float, default=UNCLASSIFIED_KM)
+    ap.add_argument('--zone-km', type=float, default=None,
+                    help="restrict the term's support (glacier_fraction) to this distance from cells with an unsaturated label")
+    ap.add_argument('--out', default=None, help='default <domain>/model_inputs/gridded_snowline.nc')
     a = ap.parse_args()
-    build_snowline(a.domain_path, a.snowline_dir, a.years, a.unclassified_km)
+    build_snowline(a.domain_path, a.snowline_dir, a.years, a.unclassified_km, a.zone_km, a.out)

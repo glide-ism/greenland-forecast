@@ -231,7 +231,8 @@ class GlacierProblem:
                 from .ocean import OceanForcing
                 self.ocean_forcing = OceanForcing.from_file(
                     tf_path, 2 ** cfg.n_levels, cfg.ocean_forcing,
-                    q0=cfg.calving_q, h00=cfg.calving_h0)
+                    q0=cfg.calving_q, h00=cfg.calving_h0,
+                    freeze_anomaly=cfg.climatology_only)
                 print(self.ocean_forcing.describe())
             else:
                 warnings.warn(f"ocean_forcing enabled but {tf_path} is missing: "
@@ -241,7 +242,7 @@ class GlacierProblem:
         # yearly_climate.py): per-year t2m anomalies / precip ratios on the
         # model's climatology, the same crop, never on the tape.
         self.yearly_climate = None
-        if cfg.yearly_climate_filename is not None:
+        if cfg.yearly_climate_filename is not None and not cfg.climatology_only:
             if cfg.base_anomaly_year is not None:
                 raise ValueError("yearly_climate_filename requires base_anomaly_year=None: "
                                  "the yearly fields are departures from the climatology window")
@@ -254,6 +255,10 @@ class GlacierProblem:
             else:
                 warnings.warn(f"yearly_climate_filename set but {yc_path} is missing: "
                               f"every year uses the climatology + index anomaly")
+        if cfg.climatology_only:
+            print("climatology mode: the atmosphere is held at the reference climate "
+                  "(monthly climatology + tbias / pbias; no yearly fields, no anomaly index) "
+                  "and the ocean at its TF climatology (dTF = 0, time-invariant margins)")
 
         ny, nx = self.gridded_data.sizes["y"], self.gridded_data.sizes["x"]
         dx = (self.gridded_data.x[1] - self.gridded_data.x[0]).item()
@@ -1073,11 +1078,16 @@ class GlacierProblem:
             anomaly_integration=cfg.anomaly_integration,
             domain_mask=self.domain.domain_mask,
             temperature_anomaly=self.temperature_anomaly,
-            base_anomaly=self.base_anomaly,
-            alpha_t2m=self.alpha_t2m,
-            precip_anomaly=self.precip_anomaly,
-            base_precip=self.base_precip,
-            alpha_precip=self.alpha_precip,
+            # config.climatology_only: reference climate for the whole run —
+            # the monthly climatology + tbias / pbias, no yearly fields and no
+            # anomaly index (the record is still passed so the step sequence
+            # and the year lookups are unchanged; alpha 0 makes every term the
+            # climatological one).
+            base_anomaly=0.0 if cfg.climatology_only else self.base_anomaly,
+            alpha_t2m=0.0 if cfg.climatology_only else self.alpha_t2m,
+            precip_anomaly=None if cfg.climatology_only else self.precip_anomaly,
+            base_precip=None if cfg.climatology_only else self.base_precip,
+            alpha_precip=None if cfg.climatology_only else self.alpha_precip,
             dx_fine=self.dx,
             n_glen=float(cfg.n_glen),
             grad_start_time=cfg.grad_start_time,
@@ -1087,7 +1097,13 @@ class GlacierProblem:
             time_writer=time_writer,
             ocean_forcing=self.ocean_forcing,
             dt_schedule=cfg.dt_schedule,
-            yearly_climate=self.yearly_climate,
+            yearly_climate=None if cfg.climatology_only else self.yearly_climate,
+            # NOT gated on climatology_only: the missing variance is a property
+            # of the climate, not of the anomaly. A drift diagnostic run
+            # without it would sit ~90 Gt/yr above the calibration and report
+            # that offset as drift.
+            interannual_sigma=cfg.interannual_sigma,
+            interannual_nodes=cfg.interannual_nodes,
         )
 
     def simulate(

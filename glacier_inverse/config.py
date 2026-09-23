@@ -480,6 +480,29 @@ class GlacierConfig:
     # legacy endpoint trapezoid) and is held at its step mean in every mode.
     anomaly_integration: str = "mean_anomaly"
 
+    # The Jensen bias "mean_anomaly" retains above, removed by quadrature
+    # instead of by more evaluations (2026-09-22; None = the previous
+    # behaviour). smb is concave in temperature, so a step evaluated at its
+    # MEAN anomaly is not its mean smb: the gap is ~ curvature sigma^2 / 2,
+    # and for Greenland (~ -160 Gt/yr/K^2 integrated, interannual sigma
+    # ~1.05 K) that is ~90 Gt/yr of spurious accumulation. It applies to
+    # INDEX years only -- reanalysis years are already one evaluation each,
+    # with their own fields -- so the affected span is precisely the
+    # pre-record spin-up, and the bias grows with its length while the
+    # calibration window carries none: the two halves of one run disagree.
+    # `interannual_sigma` is the TOTAL interannual std of the forcing
+    # temperature AFTER alpha_t2m (so, of the ice-sheet field, not of the
+    # index). Each scalar term is replaced by a Gauss-Hermite fan carrying
+    # the variance the terms do not already supply, which makes one setting
+    # correct for every epoch: a smoothed pre-instrumental index gets the
+    # full sigma, an annual index gets the remainder. This is the same device
+    # as `temp_dev` one level up -- a fixed deterministic quadrature, not a
+    # random draw, so the checkpointed backward reproduces the forward.
+    # Cost is `interannual_nodes` SMB evaluations per index term (3 is exact
+    # through 5th order); the dynamics solves are untouched.
+    interannual_sigma: Optional[float] = None
+    interannual_nodes: int = 3
+
     # Year-by-year forcing for the years a reanalysis record covers (see
     # yearly_climate.py; the file comes from preprocessing/make_climate_yearly.py
     # and holds per-(year, month) t2m anomalies and precip ratios relative to
@@ -494,6 +517,24 @@ class GlacierConfig:
     # at 1 km), "none" reads them from the file at every SMB evaluation.
     yearly_climate_filename: Optional[str] = None
     yearly_climate_cache: str = "ram"
+
+    # Hold the atmosphere at the REFERENCE CLIMATE for the whole run: the
+    # monthly climatology in the gridded inputs plus the calibrated tbias /
+    # pbias, with no yearly fields (`yearly_climate_filename` ignored), no
+    # temperature-anomaly index (alpha_t2m and base_anomaly forced to 0) and
+    # no precipitation anomaly. The OCEAN is held at its reference climate
+    # too (`OceanForcing(freeze_anomaly=True)`: dTF == 0 every step, so the
+    # calving margins are the time-invariant q0 + clim_q (TF_clim - tf_crit)
+    # and h00 + clim_h (TF_clim - tf_crit)) — the thermal forcing drives
+    # mass change through the margins on the same order as the atmosphere
+    # does through SMB, so a drift diagnostic has to hold both. The TF
+    # climatology is still read and still shapes the margins' geography;
+    # only its interannual departure is removed. Everything else — dynamics,
+    # calving, the observation terms — is unchanged, so a run with this set
+    # measures the model's own relaxation from the initial geometry: the
+    # transient a spin-up has to absorb, and the part of any dh/dt misfit
+    # that no climate forcing can explain.
+    climatology_only: bool = False
 
     # Field priors (Matern)
     bed_prior:      PriorHyperparams = PriorHyperparams(sigma=500.0,    l=2000.0,  nu=1)
