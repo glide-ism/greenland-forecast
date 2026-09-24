@@ -94,7 +94,7 @@ Q0, H00 = None, None              # baseline margins; None -> config.calving_q /
 config = load_config(DOMAIN)
 
 CHECKPOINT = CHECKPOINT or f"{config.output_dir}/level_0/torch_vars.p"
-OUT_DIR = Path(OUT_DIR or f"{config.output_dir}/forward_standalone_v2")
+OUT_DIR = Path(OUT_DIR or f"{config.output_dir}/forward_standalone")
 PHYSICAL_PATH = Path(config.output_dir) / "physical_fields.nc"
 T_START = config.t_start if T_START is None else T_START
 T_END = config.t_end if T_END is None else T_END

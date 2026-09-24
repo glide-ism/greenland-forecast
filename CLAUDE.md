@@ -1140,6 +1140,37 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   m s⁻¹, kg m⁻² s⁻¹, days since 1850-01-01). Reconcile with the ISMIP7
   variable request (github.com/ismip) before submitting.
 
+- **Discharge through Mankoff's flux gates (2026-09-23,
+  `analysis/basin_mass_balance.py --gates
+  common_data/dhdt/mankoff/dataverse_files/gates.gpkg`).** Mankoff's D is
+  the flux across gates a few km inland of the termini, NOT the residual
+  SMB - dM/dt over a basin, and the two differ by everything that leaves the
+  basin without crossing a gate. The analysis now computes the SAME integral
+  with the model's surface velocity and thickness under the gate pixels
+  (`Dg_*`; compare with Mankoff's D, not D + BMB), the Mankoff-comparable
+  `MBg_* = SMB - Dg` (their MB is the budget upstream of the gates), and the
+  integral on the observed mosaic + BedMachine thickness at the model grid
+  as the reference: at 1 km that recovers 391 of Mankoff's 491 Gt/yr (CW
+  0.58, SE 0.75 -- the narrow fast fjords), so a model gate number is read
+  against 391, not 491. TRAP in the gpkg: its 2765 rows are column strips of
+  the rasterized gates holding 5890 pixels (polygon area / 200 m^2 = 1..8),
+  not single 200 m pixels; 200 m per row undercounts the gate length 2.1x
+  (553 vs 1163 km). v7 at 2018: gate D 283 (sigmoid_c 1.0) / 175 (0.1)
+  against 391 observed, i.e. 0.72 / 0.45, while the residual D was 553 /
+  492. The gap between residual and gate D (200-270 Gt/yr) is a thin marine
+  apron (55-100 m, mostly floating, up to 25 km beyond the basin polygons,
+  removed at the calving timescale) -- which is what the GEOMETRIC calving
+  criterion does by design: a threshold on geometry, not a rate, handles
+  topological change and does not pretend to front-position physics that
+  are not established. The v7 state is too SLOW at the gates because its
+  traction was calibrated at sigmoid_c 0.1, without tongues, and at 1.0 the
+  tongues buttress and lower the surface gradients the optimization tuned
+  for; the inversion is being rerun at 1.0 (2026-09-23 overnight), and the
+  expectation is gate flux near 391 with matched velocities over the
+  BedMachine geometry. Until then the c = 0.1 "7 of 8 basins" result is a
+  compensating error: the basin residual landed near Mankoff with the
+  outlets at 0.45 of the observed gate flux.
+
 ## Known gaps / follow-ups
 
 - **Spin-up length: what is actually needed (2026-09-22).** The point of the
