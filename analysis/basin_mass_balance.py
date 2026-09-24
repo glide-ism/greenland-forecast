@@ -356,6 +356,37 @@ def plot(runs, obs, out_dir, ref_year, t_range, ref_run=None):
     fig.tight_layout(); fig.savefig(out_dir / 'basin_mb_cumulative.png', dpi=130); plt.close(fig)
 
 
+def plot_clean(runs, obs, out_dir, t_range):
+    """The two fluxes only, both positive: Mankoff SMB and gate discharge with
+    their error bands, and each run's SMB and gate discharge. No mass balance,
+    no residual -- the readable version of the rates plot for judging a
+    calving-parameter change."""
+    panels = REGIONS + ['GrIS']
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    fig, axs = plt.subplots(2, 4, figsize=(17, 7.5), sharex=True)
+    yo = obs.index + 0.5
+    for ax, r in zip(axs.ravel(), panels):
+        for v, ls, lab in (('SMB', '-', 'SMB'), ('D', '--', 'D (gates)')):
+            ax.fill_between(yo, obs[f'{v}_{r}'] - obs[f'{v}err_{r}'], obs[f'{v}_{r}'] + obs[f'{v}err_{r}'],
+                            color='k', alpha=.12, lw=0)
+            ax.plot(yo, obs[f'{v}_{r}'], 'k' + ls, lw=1.6, label=f'Mankoff {lab}')
+        for i, (name, df) in enumerate(runs.items()):
+            c, _, _ = style_for(name, i, colors)
+            d = df[(df.index >= t_range[0] - 1) & (df.index <= t_range[1] + 1)]
+            ax.plot(d.index, d[f'SMB_{r}'], '-', color=c, lw=1.4, label=f'{name} SMB')
+            if f'Dg_{r}' in d:
+                ax.plot(d.index, d[f'Dg_{r}'], '--', color=c, lw=1.4, label=f'{name} D (gates)')
+        ax.axhline(0, color='grey', lw=.5); ax.set_title(r); ax.grid(alpha=.3); ax.set_xlim(*t_range)
+        if r == 'GrIS':
+            ax.legend(fontsize=7, ncol=2)
+    for ax in axs[1]:
+        ax.set_xlabel('year')
+    for ax in axs[:, 0]:
+        ax.set_ylabel('Gt / yr')
+    fig.suptitle('SMB and discharge through the flux gates by region: Mankoff et al. (black, shaded 1 sigma) vs model')
+    fig.tight_layout(); fig.savefig(out_dir / 'basin_mb_clean.png', dpi=130); plt.close(fig)
+
+
 def main(args):
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     masks, dx, gi = region_masks(args.domain_path)
@@ -378,6 +409,12 @@ def main(args):
         print(f"reading {name} from {path}")
         runs[name] = model_series(path, masks, dx, prefer=args.prefer, gates=gates)
         runs[name].to_csv(out_dir / f'model_{name}.csv')
+    for spec in args.run_csv:
+        # a series this script wrote earlier (model_<name>.csv), for a run whose
+        # frames are gone or too slow to re-read
+        name, path = spec.split('=', 1)
+        runs[name] = pd.read_csv(path).set_index('time').sort_index()
+        print(f"loaded {name} from {path}")
     # summary over the overlap
     lo, hi = max(1986, args.t_range[0]), args.t_range[1]
     rows = []
@@ -404,6 +441,8 @@ def main(args):
     if args.ref_run is not None and args.ref_run not in runs:
         raise SystemExit(f'--ref-run {args.ref_run!r} is not one of {list(runs)}')
     plot(runs, obs, out_dir, args.ref_year, args.t_range, ref_run=args.ref_run)
+    if gates is not None or any(f'Dg_GrIS' in df for df in runs.values()):
+        plot_clean(runs, obs, out_dir, (max(1985.0, args.t_range[0]), min(2027.0, args.t_range[1])))
     print(f"wrote {out_dir}")
 
 
@@ -412,6 +451,8 @@ if __name__ == '__main__':
     ap.add_argument('--domain-path', default='domains/greenland')
     ap.add_argument('--run', action='append', default=[], metavar='NAME=DIR',
                     help='forward_standalone or forward_projection output directory (repeatable)')
+    ap.add_argument('--run-csv', action='append', default=[], metavar='NAME=CSV',
+                    help='add a series written earlier by this script (model_<name>.csv)')
     ap.add_argument('--ref-year', type=float, default=2000.0)
     ap.add_argument('--t-range', type=float, nargs=2, default=(1985, 2027))
     ap.add_argument('--out-dir', default=str(HERE / 'output' / 'basin_mb'))
