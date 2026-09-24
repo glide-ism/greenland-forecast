@@ -225,7 +225,13 @@ class GlacierProblem:
         # step; see ocean.py). Loaded on the same crop; only the annual
         # statistic the config asks for is read.
         self.ocean_forcing = None
-        if cfg.ocean_forcing.enabled:
+        if cfg.ocean_forcing.enabled and cfg.ocean_forcing.pin_front:
+            # front held at an observed mask: no TF file involved (ocean.py)
+            from .ocean import PinnedFront
+            self.ocean_forcing = PinnedFront.from_gridded(
+                self.gridded_data, cfg.ocean_forcing, q0=cfg.calving_q, h00=cfg.calving_h0)
+            print(self.ocean_forcing.describe())
+        elif cfg.ocean_forcing.enabled:
             tf_path = inputs_dir / cfg.ocean_forcing.filename
             if tf_path.exists():
                 from .ocean import OceanForcing

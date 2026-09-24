@@ -340,6 +340,12 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: O
 def make_ocean_loader(forcing_dir: Path, ocean_cfg, q0: float, h00: float):
     def load() -> Optional[OceanForcing]:
         path = Path(forcing_dir) / "thermal_forcing.nc"
+        if getattr(ocean_cfg, "pin_front", None):
+            raise SystemExit(
+                f"config.ocean_forcing.pin_front={ocean_cfg.pin_front!r}: a projection with the "
+                "calving front pinned to an observed mask is not a projection. The pin is for the "
+                "inversion (traction over the observed geometry); tune the calving parameters "
+                "against those fronts, then project with pin_front=None and OCEAN=... overrides.")
         if not ocean_cfg.enabled:
             print(f"ocean forcing disabled: constant margins q = {q0:g}, h0 = {h00:g} m")
             return None

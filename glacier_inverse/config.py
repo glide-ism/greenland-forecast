@@ -320,6 +320,27 @@ class OceanForcingConfig:
     alpha_h: float = 0.0            # m per K of TF anomaly
     q_bounds: tuple = (-1.0, 1.0)
     h0_bounds: tuple = (-1000.0, 250.0)
+    # FRONT PIN (2026-09-24): hold the calving front at an observed ice mask
+    # instead of driving the margins with the thermal forcing. `pin_front`
+    # names a boolean variable of the gridded inputs (e.g. "rgi_mask", the
+    # BedMachine ice mask incl. its floating tongues, nominal 2015); the
+    # margins become h0 = pin_h0_inside on masked cells and pin_h0_outside
+    # elsewhere, q = calving_q, dTF = 0, all time-invariant, and the TF file
+    # is not read. Under the monotone law a very negative h0 never calves
+    # grounded ice and leaves floating ice to H_c alone (tongues thicker
+    # than calving_H_c persist, thinner fringes still go), while +250 m
+    # removes any ice within 250 m of flotation at the calving timescale --
+    # a soft pin, ice can exist outside the mask transiently. Why: the
+    # velocity term cannot pull traction at an outlet the model has already
+    # lost (d misfit / d beta ~ 0 with no ice there), so inverting with the
+    # front held at observed makes beta answerable for the observed speeds
+    # over the observed geometry; the calving parameters are then tuned
+    # afterwards, forward-only, to reproduce those fronts. The whole run,
+    # spin-up included, sits at the one epoch the mask carries. Both values
+    # must lie inside h0_bounds. forward_projection refuses a pin.
+    pin_front: Optional[str] = None
+    pin_h0_inside: float = -1000.0
+    pin_h0_outside: float = 250.0
 
 
 @dataclass(frozen=True)

@@ -93,6 +93,68 @@ class _LazyYears:
         return self.da.isel(time=idx).values.astype(np.float32)
 
 
+class PinnedFront:
+    """Calving margins that hold the front at a given ice mask (config
+    `pin_front`), with the same surface as OceanForcing so forward.simulate,
+    GlacierProblem and forward_standalone consume it unchanged:
+
+        h0(x) = pin_h0_inside  where mask, else pin_h0_outside   (time-invariant)
+        q (x) = calving_q,  dTF(x) = 0
+
+    Inside the mask the monotone law with h0 << 0 never removes grounded ice
+    and leaves floating ice to H_c alone; outside, h0 = +250 m removes ice
+    within 250 m of flotation at the calving timescale, i.e. any marine
+    re-advance. See OceanForcingConfig.pin_front for why."""
+
+    def __init__(self, cfg: OceanForcingConfig, mask, *, q0: float, h00: float, source: str = ""):
+        self.cfg = cfg
+        self.mask = np.asarray(mask, dtype=bool)
+        if self.mask.ndim != 2:
+            raise ValueError(f"PinnedFront: mask must be (ny, nx), got {self.mask.shape}")
+        self.q0, self.h00 = float(q0), float(h00)
+        self.source = source
+        self.freeze_anomaly = True          # nothing varies: climatology_only is moot
+        self.years = np.array([], dtype=int)
+        self._file = None
+        lo, hi = cfg.h0_bounds
+        h_in, h_out = float(cfg.pin_h0_inside), float(cfg.pin_h0_outside)
+        if not (lo <= h_in <= hi and lo <= h_out <= hi):
+            raise ValueError(f"pin_h0_inside / pin_h0_outside ({h_in:g}, {h_out:g}) must lie in "
+                             f"h0_bounds {cfg.h0_bounds}")
+        self._h0 = np.where(self.mask, h_in, h_out).astype(np.float32)
+        self._q = np.full(self.mask.shape, float(np.clip(self.q0, *cfg.q_bounds)), np.float32)
+        self._zero = np.zeros(self.mask.shape, np.float32)
+        self.ok = self.mask
+        self.clim = self._zero
+
+    @classmethod
+    def from_gridded(cls, gridded, cfg: OceanForcingConfig, *, q0: float, h00: float) -> "PinnedFront":
+        """From the (already cropped) gridded inputs: the boolean variable
+        cfg.pin_front, taken as True where > 0.5."""
+        if cfg.pin_front not in gridded:
+            raise KeyError(f"ocean_forcing.pin_front={cfg.pin_front!r} is not a variable of the gridded inputs")
+        v = gridded[cfg.pin_front]
+        src = f"{cfg.pin_front}" + (f" @ {v.attrs['time_nominal']:g}" if "time_nominal" in v.attrs else "")
+        return cls(cfg, v.values > 0.5, q0=q0, h00=h00, source=src)
+
+    @property
+    def ny_nx(self):
+        return self.mask.shape
+
+    def describe(self) -> str:
+        c = self.cfg
+        return (f"ocean forcing: FRONT PINNED to {self.source} ({int(self.mask.sum())} masked cells, "
+                f"{int((~self.mask).sum())} outside); h0 = {c.pin_h0_inside:g} m inside / "
+                f"{c.pin_h0_outside:g} m outside, q = {self.q0:g}, dTF = 0, time-invariant; "
+                f"the thermal forcing is not read")
+
+    def anomaly(self, t0: float, t1: float) -> np.ndarray:
+        return self._zero
+
+    def margins(self, t0: float, t1: float):
+        return self._q, self._h0, self._zero
+
+
 class OceanForcing:
     def __init__(self, cfg: OceanForcingConfig, *, years: np.ndarray, stat, dist: np.ndarray,
                  q0: float, h00: float, source: str = "", freeze_anomaly: bool = False):

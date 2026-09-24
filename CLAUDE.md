@@ -440,6 +440,37 @@ near the margins at coarse levels is the blunter alternative.
    (weights, mean and total std exact; record terms preserved; both off
    switches; quadratic recovery exact); NOT yet run on the GPU.
 
+15. `config.OceanForcingConfig.pin_front` (2026-09-24; None = the TF-driven
+   margins): hold the calving front at an observed ice mask for the whole
+   run. `ocean.PinnedFront` has OceanForcing's surface (`margins`,
+   `anomaly`, `describe`, `ok`) and returns time-invariant h0 =
+   `pin_h0_inside` (-1000 m) on masked cells and `pin_h0_outside` (+250 m)
+   elsewhere, q = calving_q, dTF = 0, through the SAME checkpointed h0 field
+   forward.simulate already sets per step -- no glide change, no adjoint
+   change, TF file not read. Under the monotone law h0 << 0 never calves
+   grounded ice and leaves floating ice to `calving_H_c` alone (2015 tongues
+   thicker than 100 m persist, thinner fringes still go); +250 m removes
+   ice within 250 m of flotation at the calving timescale (a soft pin:
+   marine re-advance is cut, thick grounded land ice outside the mask is
+   SMB's problem). Built from the cropped gridded inputs at both sites
+   (`problem.py`, `forward_standalone.load_ocean_forcing`);
+   `forward_projection` REFUSES a pin. WHY: the velocity term sees the
+   misfit at an outlet the model has lost but d misfit / d beta ~ 0 there
+   (no ice for beta to act on), so v7 and v8, cold-started at different
+   sigmoid_c, converged to the same parameters and both lost NE at the
+   gates. Pinning makes beta answerable for observed speeds over observed
+   geometry; the calving parameters are then tuned afterwards, forward-only,
+   to reproduce those fronts (front position the objective, gate flux the
+   validation). The mask carries ONE epoch (rgi_mask: nominal 2015,
+   2007-2019), so the spin-up sits at the 2015 extent -- a flat hold, but
+   pre-industrial fronts were more extended, so it errs conservative -- and
+   the observation window imposes no retreat, which the 2018 velocity and
+   surface terms will feel at Jakobshavn (11 km) and Zachariae. A
+   time-varying mask (TermPicks, ~280 glaciers from 1972) is the upgrade;
+   `from_gridded` takes any boolean variable. Expect beta to run to
+   `beta_max` where 1 km cannot resolve an outlet. Config off; enable with
+   `pin_front="rgi_mask"` + a warm start.
+
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
 now differentiated — the drag Jacobians carry d(beta xi^p)/dH and /dbed via

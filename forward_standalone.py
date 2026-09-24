@@ -181,6 +181,15 @@ def load_ocean_forcing() -> Optional[OceanForcing]:
     if not OCEAN.enabled:
         print(f"ocean forcing disabled: constant margins q = {Q0:g}, h0 = {H00:g} m")
         return None
+    if OCEAN.pin_front:
+        # the same pin the inversion ran with (ocean.PinnedFront); the mask is
+        # read from the gridded inputs on the model crop, no TF file
+        from glacier_inverse.ocean import PinnedFront
+        with xr.open_dataset(f"{config.base_dir}/model_inputs/{config.gridded_filename}") as f:
+            gd = crop_to_factor(f[[OCEAN.pin_front]].load(), 2 ** config.n_levels)
+        of = PinnedFront.from_gridded(gd, OCEAN, q0=Q0, h00=H00)
+        print(of.describe())
+        return of
     if not THERMAL_PATH.exists():
         print(f"no thermal forcing at {THERMAL_PATH}: constant margins q = {Q0:g}, h0 = {H00:g} m")
         return None

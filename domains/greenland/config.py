@@ -67,7 +67,7 @@ CONFIG = GlacierConfig(
     base_dir=str(_HERE),
     vti_base_name="greenland",
     gridded_filename=_GRIDDED_FILE,
-    results_subdir=f"inverse_v7",
+    results_subdir=f"inverse_v9",
     smb_model="enthalpy",
     anomaly_integration="mean_anomaly",
     #anomaly_filename = "temperature_anomaly_flat.nc",
@@ -150,7 +150,7 @@ CONFIG = GlacierConfig(
     climatology_only=False,
 
     n_levels=6,
-    max_level=2,
+    max_level=0,
     max_iters=(50, 100, 200),
 
     init_from_observed_geometry=True,
@@ -185,7 +185,7 @@ CONFIG = GlacierConfig(
     # its flotation thickness, so floating tongues thicker than that persist
     # (the example's inverse uses timescale 0.1 with the same q).
     thklim=1.0,
-    sigmoid_c=0.1,
+    sigmoid_c=1.0,
     calving_timescale=0.5,
     # baselines of the hybrid threshold H - H_f < q H + h0: q = 0 calves
     # exactly the floating ice before the ocean warms (the standalone
@@ -211,12 +211,16 @@ CONFIG = GlacierConfig(
     # over its anomaly range. STARTING POINTS for the (clim_h, alpha_h) sweep.
     ocean_forcing=OceanForcingConfig(
         enabled=True, statistic="mean", ref_years=(1950, 1979), max_dist_km=5.0,
-        tf_crit=3.5, clim_q=0.0, clim_h=15.0, alpha_q=0.0, alpha_h=100.0),
-
+        tf_crit=5.5, clim_q=0.0, clim_h=15.0, alpha_q=0.0, alpha_h=100.0,
+        # Front pin (2026-09-24, library change 15): set pin_front="rgi_mask"
+        # to hold the front at BedMachine's 2015 ice mask for the WHOLE run and
+        # invert traction over the observed geometry; the TF settings above are
+        # then ignored. None = the TF-driven margins.
+        pin_front=None),
     # ---- FAS / Vanka settings from the same example, both solvers
     forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,
-                                absolute_tolerance=10.0, report_norms=False,
+                                absolute_tolerance=10.0, report_norms=True,
                                 omega=0.5, momentum_damping=0.1, step_tolerance=1e-6),
     adjoint_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,

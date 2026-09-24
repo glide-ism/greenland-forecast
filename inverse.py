@@ -28,7 +28,7 @@ OUTPUT_PATH = config.output_dir
 # the 435 k slow-ice cells the prior has 1.8x too fast, and its "more
 # friction" update leaks onto the outlets through the beta prior (fast ice
 # 0.35 -> 0.22 of observed in one step); from v5 the descent is monotone.
-WARM_START_PATH = None#f"{DOMAIN}/inverse_v6_driftcheck/level_1/torch_vars.p"  # None = from the prior
+WARM_START_PATH = f"{DOMAIN}/inverse_v8/level_0/torch_vars.p"  # None = from the prior
 #WARM_START_PATH = f"{DOMAIN}/inverse_v6_driftcheck/level_1/torch_vars.p"  # None = from the prior
 #WARM_START_PATH = f"{DOMAIN}/inverse/level_1/torch_vars.p"
 
