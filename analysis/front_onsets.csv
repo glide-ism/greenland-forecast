@@ -1,0 +1,24 @@
+name,region,tongue_ever,onset,onset_lo,onset_hi,confidence,note
+JAKOBSHAVN_ISBRAE,CW,1,1998,1998,2003,high,floating tongue disintegrated 1998-2003 (Joughin 2004; Luckman & Murray 2005)
+HELHEIMGLETSCHER,SE,0,2001,2001,2005,high,7 km retreat 2001-2005 then readvance (Howat 2005)
+KANGERLUSSUAQ,CE,0,2004,2004,2005,high,5 km retreat 2004-2005 (Luckman 2006)
+ZACHARIAE_ISSTROM,NE,1,2003,2002,2012,high,tongue loss from 2002-03; collapse after 2012 (Mouginot 2015)
+NIOGHALVFJERDSFJORDEN,NE,1,stable,,,high,79N tongue intact through 2019 (Spalte tributary lost 2020)
+PETERMANN_GLETSCHER,NO,1,2010,2010,2012,high,calving 2010 and 2012 removed ~1/3 of the tongue; the tongue persists
+RYDER_GLETSCHER,NO,1,stable,,,medium,tongue with advance/retreat cycles; no loss
+STEENSBY_GLETSCHER,NO,1,stable,,,low,tongue; to check (Hill et al. 2018)
+HAGEN_BRAE,NO,1,stable,,,low,tongue; to check (Hill et al. 2018)
+OSTENFELD_GLETSCHER,NO,1,2003,2001,2005,medium,C.H. Ostenfeld lost its tongue early 2000s (Hill et al. 2018)
+HUMBOLDT_GLETSCHER,NO,0,2000,1999,2007,medium,northern front retreat from ~1999 (Carr 2015; Hill 2018)
+TRACY_GLETSCHER,NW,0,2001,2000,2005,medium,15 km retreat 1999-2014 (Porter 2014)
+HEILPRIN_GLETSCHER,NW,0,stable,,,medium,neighbour of Tracy; no retreat (Porter 2014)
+ALISON_GLETSCHER,NW,0,2001,2001,2005,medium,retreat 2001-2005 (Moon & Joughin 2008)
+UPERNAVIK_ISSTROM_N,NW,0,2005,2005,2009,medium,rapid retreat 2005-2009 (Khan 2013)
+KONG_OSCAR_GLETSCHER,NW,0,2005,2003,2010,low,NW retreat wave after 2005 (Moon & Joughin 2008)
+STORE_GLETSCHER,CW,0,stable,,,high,front stable on a sill (Morlighem 2016; Todd 2018)
+RINK_ISBRAE,CW,0,stable,,,high,stable
+DAUGAARD-JENSEN,CE,0,stable,,,high,stable
+KIV_STEENSTRUP_NODRE_BRAE,CE,0,2018,2018,2021,high,sudden retreat from 2018
+KANGIATA_NUNAATA_SERMIA,SW,0,2005,2005,2011,low,retreat late 2000s (Motyka 2017)
+NARSAP_SERMIA,SW,0,2010,2010,2013,medium,retreat 2010-2013 (Motyka 2017)
+MIDGARDGLETSCHER,SE,0,2003,2003,2009,low,retreat 2000s

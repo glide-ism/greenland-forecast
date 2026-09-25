@@ -1202,6 +1202,67 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   compensating error: the basin residual landed near Mankoff with the
   outlets at 0.45 of the observed gate flux.
 
+- **Calving screen (2026-09-24): `analysis/calving_screen.py` +
+  `analysis/front_onsets.csv`.** The calving law is geometric and the
+  margins are functions of the TF record and the parameters alone, so
+  whether an OBSERVED front is admissible, and the year it stops being
+  admissible, need no forward run: the screen evaluates glide's
+  `calving_F` (numpy transcription, kernel constant rho_i/rho_w = 0.917 --
+  see below) on the 2015 geometry at every Mankoff gate outlet grouped by
+  Mouginot name (139 fronts), for a box of (tf_crit, clim_h, alpha_h) x a
+  forcing-scale axis (`--dtf-scale`) x temporal filters on dTF (`--filter
+  none | box:N | ema:TAU`), with dTF aggregated over the model's own steps
+  (`--schedule 1850:10,1990:1`). Three flux-weighted (H |u|) cell sets per
+  front: T = observed floating cells thicker than H_c (the tongue; q = 0
+  makes F = -h0 there, so a tongue flips exactly when alpha_h dTF crosses
+  -h0_base), A = ocean cells adjacent to the terminus carrying the slab the
+  law's implicit rate limit allows (min(H_term, H u tau / dx); 566 of 903
+  advance cells cannot reach H_c at any h0), term = the terminus cells with
+  H > H_c (over-retreat behind the 2015 front). Scored against
+  `front_onsets.csv` (23 fronts, literature onsets, approximate -- EDIT IT)
+  with an asymmetric loss (early / spurious / denied 3, late / missed /
+  never-admissible / advanced 1), and, more usefully, per front: the
+  REQUIRED RATIO -h0_base/alpha_h (stable: > max dTF over the record;
+  retreat: in (max dTF before the onset window, max dTF through it]) and
+  the alpha_h feasibility window per (tf_crit, clim_h). 13 s for 900
+  combos. Findings: (1) TF_clim does not classify tongue presence -- the 9
+  tongue-bearing fronts span 0.3-4.8 degC and 85 of 129 grounded fronts sit
+  below the warmest tongue; the front's principal strain rate (mosaic) is
+  no better (northern tongues 0.02-0.07 /yr, but Rink 1.2 and Jakobshavn
+  1.8 are tongue-bearing too). (2) The ratio rule is contradictory under any
+  TF-linear static margin: Petermann and Zachariae have the SAME TF_clim
+  (2.27) but need -h0/alpha in (0.25, 0.41] and (0.95, 1.53]; 79N (1.69)
+  needs > 1.62, Humboldt (1.89) <= 0.26 -- the required margin is not
+  monotone in TF_clim, so no (tf_crit, clim_h, alpha_h) times more than 8 of
+  the 23 fronts (the config's (3, 10, 50) gets 3: 6 early, 4 spurious, 7
+  never admissible). Filters shift the ratios but not the contradictions;
+  ema:5 opens Steenstrup's window (peak-before-onset under `none`),
+  Ostenfeld stays empty (the product's anomaly there peaks in the 1950s-80s).
+  (3) The forcing scale is degenerate with alpha_h (the ratio table is
+  scale-free), so the forcing-uncertainty axis costs nothing. (4) On the
+  1 km grid 35 % of the observed GROUNDED terminus cells thicker than 100 m
+  have H below flotation (median HAB 41 m at ice_fraction > 0.9; Kanger
+  -280, Jakobshavn -75, Helheim -57 flux-weighted) -- BedMachine's front on
+  the model grid floats, so any positive static margin removes the seeded
+  fronts of the big warm outlets at t0 (the "missing ice" of v6), and the
+  pinned run keeps them only because h0 = -1000 inside the mask.
+  Consequence: the static margin must be NEGATIVE at every large outlet
+  with a per-front magnitude, i.e. an h0_base FIELD (the ratio table gives
+  it, per front, in units of alpha_h), not a function of TF_clim; the
+  remaining knob is then alpha_h alone, and tongue growth at the fast
+  grounded fronts (Helheim, Store: not rate-limited) is the price -- which
+  is the physics the geometric law lacks (a strain-rate term). Outputs in
+  `analysis/output/calving_screen/` (census.csv, scores.csv,
+  windows_summary.csv, flips_*.csv, windows_tc*_ch*.csv).
+  **Density ratio (found 2026-09-24)**: glide's kernels hard-code
+  `RHO_I_OVER_RHO_W 0.917` (common.cu, i.e. rho_w = 1000) for phi / xi /
+  the calving flag, while the config's `rho_water = 1028` (0.892) is what
+  problem.py (`_initial_thickness_from_geometry`, `flotation_factor`),
+  forward_standalone, forward_projection and ismip_exporter use: the
+  dynamics float ice 3 % thinner than the Python side assumes (18 m of HAB
+  at a 600 m grounding line). Not yet reconciled -- glide should take the
+  ratio from the config.
+
 ## Known gaps / follow-ups
 
 - **Spin-up length: what is actually needed (2026-09-22).** The point of the
