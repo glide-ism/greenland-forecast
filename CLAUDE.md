@@ -1077,6 +1077,35 @@ near the margins at coarse levels is the blunter alternative.
    guard): completes, 115 solves / 343 V-cycles / 166 s, 5 solves capped at
    |r| ~ 12 (floors at the NW trunk x -293 y -1821 and Scoresby Sund; 150
    post-sweeps clear them, more V-cycles do not).
+   **ROOT CAUSE of the cold-start blow-up: the shear-row Newton correction
+   (2026-09-28; glide stress.cu `get_sigma_vert_dvisc`).** Patch-level
+   instrumentation (a debug copy of vanka.cu recording, per Newton iteration,
+   the damped J, r, state, LU pivots and step of two target patches;
+   scratch `patch_debug.py`, `patch_debug_vcycle.py`, copy in
+   `analysis/output/scratch/glide_dbg/`) on the v14 first step: both patches
+   START well conditioned (cond 20-30, pivots ~1, steps < 10 m/yr), then within
+   2-4 iterations the ud / vd DIAGONALS change sign (-18 -> +27 -> +67 ->
+   1e10) while the u / v diagonals stay negative; the patch goes singular
+   (cond 5.6e7) and steps 1.7e7. The correction recovers E2 by inverting eta,
+   but eta is frozen at the sweep's starting state while the patch Newton
+   moves u_d: from a cold start E2 ~ eps_reg, so the correction grows like
+   u_d^2 / eps_reg. At any consistent state it is bounded (the facet is part
+   of the invariant, E2 >= K_2 u^2 / (2 den)) and can only scale the diagonal
+   down to 1/n. FIX: E2 <- max(E2 + K_2 (u_c^2 - u_c0^2) / (2 den),
+   K_2 u_c^2 / (2 den)) with u_c0 the facet's sweep-start value -- exact at
+   u_c = u_c0 (a plain lower bound also changed normal iterations and put
+   grad_test over threshold, 1.4 %). Only the smoother Jacobian changes, not
+   the residual. Results: the two patches converge monotonically (|r| 65 ->
+   0.13); pure fine smoothing from the cold start is stable; with backtracking
+   and cold_start_dt=None every first-step dump (v14, 2928, omega 0.25,
+   post 50) converges in 4-5 V-cycles; full 1 km forward from v14 without
+   the guard: 114 solves / 350 V-cycles / 178 s, first solve 6 cycles (guard
+   run 343 / 166 s; end states differ by 7e-4 in volume, median |dH| 1.4 cm
+   -- probably the solves ending unconverged at the floors, not
+   confirmed). glide tests: grad 0.31 % (HEAD 0.85 %), jvp / adjoint / ssa
+   unchanged. Backtracking is still needed (the coarse correction at the
+   Scoresby Sund fjord); `cold_start_dt` is now insurance, not a
+   requirement. Not done: a patch line search / adaptive LM damping.
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
