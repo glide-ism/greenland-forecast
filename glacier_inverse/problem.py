@@ -144,7 +144,8 @@ def _apply_solver_settings(solver, cfg: SolverConfig) -> None:
                                freeze_coarse_phi=cfg.freeze_coarse_phi,
                                trace_file=cfg.trace_file, trace_every=cfg.trace_every,
                                dump_dir=cfg.dump_dir, dump_max=cfg.dump_max,
-                               backtrack=cfg.backtrack, backtrack_scales=tuple(cfg.backtrack_scales))
+                               backtrack=cfg.backtrack, backtrack_scales=tuple(cfg.backtrack_scales),
+                               raise_on_nonfinite=cfg.raise_on_nonfinite)
 
 
 def _crop_to_factor(gridded_data: xr.Dataset, factor: int) -> xr.Dataset:

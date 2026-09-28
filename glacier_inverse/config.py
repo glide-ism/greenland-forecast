@@ -312,6 +312,9 @@ class SolverConfig:
     # of backtrack_scales (0 = pure smoothing).
     backtrack: bool = False
     backtrack_scales: tuple = (1.0, 0.5, 0.25, 0.0)
+    # Forward cycle only: raise FloatingPointError when a solve ends with a
+    # non-finite residual (after its dump is written), stopping the run.
+    raise_on_nonfinite: bool = True
 
 
 @dataclass(frozen=True)

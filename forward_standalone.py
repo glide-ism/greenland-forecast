@@ -358,7 +358,8 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
         trace_file=getattr(fs, "trace_file", None), trace_every=getattr(fs, "trace_every", 25),
         dump_dir=getattr(fs, "dump_dir", None), dump_max=getattr(fs, "dump_max", 5),
         backtrack=getattr(fs, "backtrack", False),
-        backtrack_scales=tuple(getattr(fs, "backtrack_scales", (1.0, 0.5, 0.25, 0.0))))
+        backtrack_scales=tuple(getattr(fs, "backtrack_scales", (1.0, 0.5, 0.25, 0.0))),
+        raise_on_nonfinite=getattr(fs, "raise_on_nonfinite", True))
     model.forward_solver.vanka_options.omega.set(cp.float32(fs.omega))
     model.forward_solver.vanka_options.newton_options.momentum_damping.set(cp.float32(fs.momentum_damping))
     model.forward_solver.vanka_options.newton_options.step_tolerance.set(cp.float32(fs.step_tolerance))
