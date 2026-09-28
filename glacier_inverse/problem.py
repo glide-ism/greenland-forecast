@@ -145,7 +145,8 @@ def _apply_solver_settings(solver, cfg: SolverConfig) -> None:
                                trace_file=cfg.trace_file, trace_every=cfg.trace_every,
                                dump_dir=cfg.dump_dir, dump_max=cfg.dump_max,
                                backtrack=cfg.backtrack, backtrack_scales=tuple(cfg.backtrack_scales),
-                               raise_on_nonfinite=cfg.raise_on_nonfinite)
+                               raise_on_nonfinite=cfg.raise_on_nonfinite,
+                               cold_start_dt=cfg.cold_start_dt)
 
 
 def _crop_to_factor(gridded_data: xr.Dataset, factor: int) -> xr.Dataset:

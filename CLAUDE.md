@@ -1052,6 +1052,31 @@ near the margins at coarse levels is the blunter alternative.
    sweep and the coarse grids cannot represent. `dump_max` now keeps the
    MOST RECENT files (older ones deleted), so the solve that ends a run is
    always on disk.
+   **The first-step NaNs (2026-09-28): COLD START at large dt.** A NaN at
+   the first step after the thermal spin-up (inversion from
+   inverse_v14/level_0, and dump 2928) is not the thermal solver (B finite,
+   17-63) and not the coarse grid: pure fine smoothing blows up in ONE
+   sweep from u = 0 at dt 25 (x 68, y -3216 km: 473 m of grounded ice on
+   steep ground beside a calving cell; H -> 3.7e4, vd -> 2.2e6); level 1
+   diverges first in the full V-cycle for the same reason. At dt 25 the
+   thickness row of a Vanka patch is weak (1/dt = 0.04 against velocity
+   couplings ~H/dx), and from zero velocities a few patches take runaway
+   Newton steps. Every run starts cold (reset_state and the thermal
+   spin-up zero the velocities), which is why all of the day's failures
+   were FIRST steps and why they depended on the parameter state. The same
+   state solved at dt = 1 converges in 2 V-cycles, and from those
+   velocities the dt-25 step in 5. FIX: glide `FASCDConfig.cold_start_dt`
+   (SolverConfig `cold_start_dt`, default 1.0): a solve starting from zero
+   velocities with dt > cold_start_dt first solves at that dt, keeps the
+   velocities, restores H / H_prev / mask / flags, then takes the real step
+   with the COLD residual as its relative-tolerance reference (the warm
+   start's initial residual is ~13x larger and would loosen the step).
+   Also fixed: the backtracking fallback multiplied a NaN coarse correction
+   by 0. Replays: every first-step dump converges in 5-6 V-cycles at the
+   usual accuracy; full 1 km forward from v14 (post_steps 50, backtrack,
+   guard): completes, 115 solves / 343 V-cycles / 166 s, 5 solves capped at
+   |r| ~ 12 (floors at the NW trunk x -293 y -1821 and Scoresby Sund; 150
+   post-sweeps clear them, more V-cycles do not).
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is

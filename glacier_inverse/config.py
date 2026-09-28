@@ -315,6 +315,13 @@ class SolverConfig:
     # Forward cycle only: raise FloatingPointError when a solve ends with a
     # non-finite residual (after its dump is written), stopping the run.
     raise_on_nonfinite: bool = True
+    # Forward cycle only: a solve starting from zero velocities (the first
+    # step of every run: reset_state / the thermal spin-up zero them) with
+    # dt > cold_start_dt first solves at dt = cold_start_dt to initialize the
+    # velocities, then takes the real step from them (glide
+    # FASCDConfig.cold_start_dt). From u = 0 at dt 25 the Vanka patches on
+    # steep ice beside calving cells took runaway Newton steps. None = off.
+    cold_start_dt: Optional[float] = 1.0
 
 
 @dataclass(frozen=True)
