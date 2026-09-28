@@ -1037,7 +1037,21 @@ near the margins at coarse levels is the blunter alternative.
    were STRIPPED before the commit; kept: freeze_coarse_calving / _phi
    exposure, trace, dump / replay, backtrack. User, same day: with backtrack
    and post_steps 50 the 1 km inversion ran 20 fine-level iterations before
-   a NaN (dump_max had been reached by then).
+   a NaN (dump_max had been reached by then). The ten dumps it did write (`./dump`,
+   solves 6-1338) are all mild: |r| stalls at 10.6-15.3 against
+   absolute_tolerance 10, and 63-90 % of the remaining |r_H|^2 sits at ONE
+   fjord, x 545-563, y -1871..-1908 km (the Scoresby Sund / Daugaard-Jensen
+   system; dump 1291 also x 491 y -2291, 5 km/yr ice): a smooth same-signed
+   r_H of -0.3..-0.5 m/yr along a 3-5-cell fast grounded trunk (1-3 km/yr,
+   beta ~16 at the pinned front) plus the apron below it. NO mask / psi /
+   phi flips between cycles -- slow convergence, not a switching cycle:
+   30 V-cycles converge (after 12), post_steps 100 in 2, 150 in 1, finest
+   100 in 1; backtracking is irrelevant there. Reading: an along-channel
+   transport mode (upwind H at Courant 25-75 couples cells far down a trunk
+   narrower than a coarse cell) that local Vanka sweeps move ~1 cell per
+   sweep and the coarse grids cannot represent. `dump_max` now keeps the
+   MOST RECENT files (older ones deleted), so the solve that ends a run is
+   always on disk.
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
