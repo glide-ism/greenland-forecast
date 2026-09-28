@@ -225,11 +225,17 @@ class GlacierProblem:
         # step; see ocean.py). Loaded on the same crop; only the annual
         # statistic the config asks for is read.
         self.ocean_forcing = None
-        if cfg.ocean_forcing.enabled and cfg.ocean_forcing.pin_front:
-            # front held at an observed mask: no TF file involved (ocean.py)
+        if cfg.ocean_forcing.enabled and (cfg.ocean_forcing.pin_front or getattr(cfg.ocean_forcing, "pin_front_filename", None)):
+            # front held at an observed mask: no TF file involved (ocean.py);
+            # a yearly mask file (TermPicks) takes precedence over the static variable
             from .ocean import PinnedFront
-            self.ocean_forcing = PinnedFront.from_gridded(
-                self.gridded_data, cfg.ocean_forcing, q0=cfg.calving_q, h00=cfg.calving_h0)
+            if getattr(cfg.ocean_forcing, "pin_front_filename", None):
+                self.ocean_forcing = PinnedFront.from_file(
+                    Path(cfg.base_dir) / "model_inputs" / cfg.ocean_forcing.pin_front_filename, 2 ** cfg.n_levels,
+                    cfg.ocean_forcing, q0=cfg.calving_q, h00=cfg.calving_h0)
+            else:
+                self.ocean_forcing = PinnedFront.from_gridded(
+                    self.gridded_data, cfg.ocean_forcing, q0=cfg.calving_q, h00=cfg.calving_h0)
             print(self.ocean_forcing.describe())
         elif cfg.ocean_forcing.enabled:
             tf_path = inputs_dir / cfg.ocean_forcing.filename
@@ -1110,7 +1116,33 @@ class GlacierProblem:
             # that offset as drift.
             interannual_sigma=cfg.interannual_sigma,
             interannual_nodes=cfg.interannual_nodes,
+            thermal=self.thermal_driver(level),
+            thermal_T_surface=self.thermal_surface_temperature(tbias),
         )
+
+    # ------------------------------------------------------------ thermal
+    def thermal_driver(self, level: int):
+        """The level's ThermalDriver (built once per level), or None when
+        config.thermal is None (isothermal B from A_glen)."""
+        tcfg = getattr(self.config, "thermal", None)
+        if tcfg is None:
+            return None
+        if not hasattr(self, "_thermal_drivers"):
+            self._thermal_drivers = {}
+        if level not in self._thermal_drivers:
+            from .thermal import ThermalDriver
+            self._thermal_drivers[level] = ThermalDriver(
+                self.model, level, tcfg, rho_i=float(self.config.rho_ice),
+                thin_B=float(self.config.B_rate) if tcfg.thin_ice_isothermal else None)
+        return self._thermal_drivers[level]
+
+    def thermal_surface_temperature(self, tbias=None):
+        tcfg = getattr(self.config, "thermal", None)
+        if tcfg is None:
+            return None
+        from .thermal import surface_temperature_fine
+        return surface_temperature_fine(
+            self.t2m, tbias if tcfg.surface_T_tbias else None)
 
     def simulate(
         self,

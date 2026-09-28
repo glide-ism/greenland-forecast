@@ -49,7 +49,7 @@ def run_all(domain_path: str, year: int, velocity_source: str = DEFAULT_VELOCITY
             dhdt_source: str = 'atl15', with_radar: bool = False,
             skip_insolation: bool = False, dhdt_window=(None, None),
             extra_dhdt=(), dhdt_method: str = None,
-            dhdt_endpoint_window: float = 2.0) -> None:
+            dhdt_endpoint_window: float = 2.0, dem_smooth_km: float = 1.0) -> None:
     """`dhdt_method`: 'endpoint' | 'trend' for the primary dh/dt product
     (None = make_dhdt's default: endpoint for the time-series sources).
     `extra_dhdt` entries are (source, t0, t1, name[, method]); an entry
@@ -57,7 +57,7 @@ def run_all(domain_path: str, year: int, velocity_source: str = DEFAULT_VELOCITY
     Path(domain_path, 'model_inputs').mkdir(parents=True, exist_ok=True)
 
     _banner("Geometry (BedMachine)")
-    build_dem(domain_path)
+    build_dem(domain_path, smooth_sigma_km=dem_smooth_km)
 
     _banner(f"Velocity ({velocity_source})")
     build_velocity(domain_path, source=velocity_source)
@@ -116,6 +116,8 @@ if __name__ == "__main__":
     parser.add_argument("--with-radar", action="store_true",
                         help="also build flightlines.gpkg from IceBridge MCoRDS L2")
     parser.add_argument("--skip-insolation", action="store_true")
+    parser.add_argument("--dem-smooth-km", type=float, default=1.0,
+                        help="Gaussian smoothing of the native BedMachine / ArcticDEM fields before resampling, sigma in km (0 = none)")
     parser.add_argument("--dhdt-t0", type=float, default=None)
     parser.add_argument("--dhdt-t1", type=float, default=None)
     parser.add_argument("--dhdt-method", choices=('endpoint', 'trend'), default='endpoint',
@@ -137,4 +139,4 @@ if __name__ == "__main__":
         extra.append((parts[0], float(parts[1]), float(parts[2]), parts[3], *parts[4:]))
     run_all(args.domain_path, args.year, args.velocity_source, args.dhdt_source,
             args.with_radar, args.skip_insolation, (args.dhdt_t0, args.dhdt_t1), extra,
-            dhdt_method=args.dhdt_method, dhdt_endpoint_window=args.dhdt_endpoint_window)
+            dhdt_method=args.dhdt_method, dhdt_endpoint_window=args.dhdt_endpoint_window, dem_smooth_km=args.dem_smooth_km)

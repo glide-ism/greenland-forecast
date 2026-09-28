@@ -111,11 +111,28 @@ def _rasterize_labels(gdf, grid, start_label: int):
 
 def build_dem(domain_path: str, bedmachine_path: str = None,
               basins_path: str = None, rgi_path: str = None,
-              arcticdem_path: str = None, surface_source: str = "auto") -> xr.Dataset:
+              arcticdem_path: str = None, surface_source: str = "auto",
+              smooth_sigma_km: float = 1.0) -> xr.Dataset:
     """Build the gridded geometry dataset for `domain_path` and write it.
 
     `surface_source`: "bedmachine", "arcticdem", or "auto" (ArcticDEM overlay
     if the file exists, else BedMachine).
+
+    `smooth_sigma_km`: Gaussian smoothing (sigma in km; 0 = none) applied to
+    the NATIVE BedMachine surface, bed and thickness (150 m) and to the
+    ArcticDEM overlay (100 m, NaN-aware) BEFORE the area-average resampling
+    to the model grid. At native resolution the ice / rock / water
+    boundaries in steep topography are resolved, so a 1 km filter there is
+    a genuine anti-aliasing filter for what the 1 km grid can carry --
+    nothing below 1 km is resolved by the model anyway, so no spurious
+    flotation or steep topography is lost that would not have been lost.
+    The same linear kernel on surface, bed and thickness keeps S - B = H.
+    Why: A_glen 1e-16 (soft ice) exposed solver aliasing at the ice-free /
+    ice boundaries of extremely steep terrain that the stiff rheology had
+    smoothed through the physics (2026-09-25); a post-resampling, mask-aware
+    smoothing of the 1 km surface cannot reach that (the boundary is where
+    the mask is). `errbed`, the radar-pick subcell averages and the mask
+    fractions are not smoothed.
     """
     domain_path = Path(domain_path)
     output_path = domain_path / 'model_inputs' / 'gridded_dem.nc'
@@ -136,6 +153,17 @@ def build_dem(domain_path: str, bedmachine_path: str = None,
         surface_time['time_nominal'] = float(bm.attrs['nominal_year'])
     bm_version = bm.attrs.get('product_version', bm.attrs.get('title', 'BedMachine'))
 
+    native_dx = float(abs(bm.x.values[1] - bm.x.values[0]))
+    smoothing = 'none'
+    if smooth_sigma_km and smooth_sigma_km > 0:
+        from scipy import ndimage
+        sig = smooth_sigma_km * 1e3 / native_dx
+        for v in ('surface', 'bed', 'thickness'):
+            arr = bm[v].values.astype('float32')
+            bm[v] = bm[v].copy(data=ndimage.gaussian_filter(arr, sig, mode='nearest'))
+        smoothing = (f"gaussian sigma {smooth_sigma_km:g} km on the native BedMachine surface / bed / thickness "
+                     f"({native_dx:g} m, {sig:.2f} px) before resampling")
+        print(f"native BedMachine surface / bed / thickness smoothed: sigma {smooth_sigma_km:g} km = {sig:.2f} px at {native_dx:g} m")
     surface = _regrid(bm.surface.astype('float32'), template, avg)
     bed = _regrid(bm.bed.astype('float32'), template, avg)
     thickness = _regrid(bm.thickness.astype('float32'), template, avg)
@@ -199,6 +227,20 @@ def build_dem(domain_path: str, bedmachine_path: str = None,
         adem = rioxarray.open_rasterio(arcticdem_path, masked=True).squeeze('band', drop=True)
         adem = adem.rio.clip_box(grid.xmin - 2000, grid.ymin - 2000,
                                  grid.xmax + 2000, grid.ymax + 2000)
+        if smooth_sigma_km and smooth_sigma_km > 0:
+            # the same filter at ArcticDEM's native resolution, NaN-aware
+            # (normalized convolution over the voids)
+            from scipy import ndimage
+            adx = float(abs(adem.x.values[1] - adem.x.values[0]))
+            sig_a = smooth_sigma_km * 1e3 / adx
+            vals = adem.values.astype('float32'); good = np.isfinite(vals)
+            num = ndimage.gaussian_filter(np.where(good, vals, 0.0).astype('float32'), sig_a, mode='nearest')
+            den = ndimage.gaussian_filter(good.astype('float32'), sig_a, mode='nearest')
+            sm = np.where(den > 0.5, num / np.maximum(den, 1e-6), np.nan).astype('float32')
+            adem = adem.copy(data=np.where(good, sm, np.nan).astype('float32'))
+            smoothing += f"; ArcticDEM overlay smoothed at {adx:g} m ({sig_a:.1f} px, NaN-aware)"
+            print(f"ArcticDEM overlay smoothed: sigma {smooth_sigma_km:g} km = {sig_a:.1f} px at {adx:g} m")
+            del vals, good, num, den, sm
         adem = _regrid(adem.astype('float32'), template, avg)
         # ArcticDEM heights are ellipsoidal (WGS84); BedMachine is geoid
         # referenced -> subtract BedMachine's geoid if present.
@@ -213,6 +255,8 @@ def build_dem(domain_path: str, bedmachine_path: str = None,
                                     "BedMachine elsewhere")
         if n_fill:
             print(f"ArcticDEM overlay: {n_fill} ice cells without data keep BedMachine surface")
+
+    surface_attrs['smoothing'] = smoothing
 
     # Domain mask: everything in the grid except non-Greenland ice
     # (Ellesmere/Canadian Arctic edge), further clipped to an outline if given.
@@ -332,6 +376,9 @@ if __name__ == "__main__":
     parser.add_argument("--arcticdem", type=str, default=None)
     parser.add_argument("--surface-source", choices=("auto", "bedmachine", "arcticdem"),
                         default="auto")
+    parser.add_argument("--smooth-sigma-km", type=float, default=1.0,
+                        help="Gaussian smoothing of the native BedMachine surface / bed / thickness and the ArcticDEM overlay "
+                             "before resampling, sigma in km (0 = none)")
     args = parser.parse_args()
     build_dem(args.domain_path, args.bedmachine, args.basins, args.rgi,
-              args.arcticdem, args.surface_source)
+              args.arcticdem, args.surface_source, args.smooth_sigma_km)

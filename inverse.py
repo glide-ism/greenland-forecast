@@ -28,8 +28,9 @@ OUTPUT_PATH = config.output_dir
 # the 435 k slow-ice cells the prior has 1.8x too fast, and its "more
 # friction" update leaks onto the outlets through the beta prior (fast ice
 # 0.35 -> 0.22 of observed in one step); from v5 the descent is monotone.
-WARM_START_PATH = f"{DOMAIN}/inverse_v8/level_0/torch_vars.p"  # None = from the prior
-#WARM_START_PATH = f"{DOMAIN}/inverse_v6_driftcheck/level_1/torch_vars.p"  # None = from the prior
+#WARM_START_PATH = None
+WARM_START_PATH = f"{DOMAIN}/inverse_v11/level_1/torch_vars.p"  # None = from the prior
+#WARM_START_PATH = f"{DOMAIN}/inverse_v9/level_2/torch_vars.p"  # None = from the prior
 #WARM_START_PATH = f"{DOMAIN}/inverse/level_1/torch_vars.p"
 
 problem = GlacierProblem(config)
@@ -153,8 +154,9 @@ for level in range(config.max_level, config.min_level - 1, -1):
     diag = make_diagnostic_fields(problem.mg[level])
     level_dir = f"{OUTPUT_PATH}/level_{level}/vti"
     problem.write_observations(level_dir, level=level)
+    thermal = problem.thermal_driver(level)     # None unless config.thermal
     vti_writer = make_loss_vti_writer(problem.mg[level], level_dir,
-                                       config.vti_base_name, diag)
+                                       config.vti_base_name, diag, thermal=thermal)
 
     for i in range(config.max_iters[level]):
         # Rank-few fingerprint nuisance: re-measure the smooth SMB
@@ -177,7 +179,7 @@ for level in range(config.max_level, config.min_level - 1, -1):
         prev_lrs = lrs
 
         # Periodically emit a per-time-step VTI series.
-        time_writer = (make_time_vti_writer(problem.mg[level], level_dir)
+        time_writer = (make_time_vti_writer(problem.mg[level], level_dir, thermal=thermal)
                        if i % 10 == 0 else None)
 
         sim, physical = problem.simulate(
@@ -219,6 +221,7 @@ for level in range(config.max_level, config.min_level - 1, -1):
         # memory. Costs milliseconds per iteration against a full solve.
         cp.get_default_memory_pool().free_all_blocks()
         torch.cuda.empty_cache()
+        #save_whitened_params(params, f"{OUTPUT_PATH}/level_{level}/torch_vars.p", bed_parametrization=problem.priors.bed_parametrization)
 
     # Final evaluation (no backward) so the multigrid state matches the
     # converged parameters before we save it out. Its residual fields (raw
@@ -241,6 +244,13 @@ for level in range(config.max_level, config.min_level - 1, -1):
         mg_lvl.sliding.beta.to_dataarray(),
         mg_lvl.forcing.smb.to_dataarray(),
     ])
+    if thermal is not None:
+        # end-of-run basal and depth-averaged temperature (K), on the H grid
+        H_da = mg_lvl.state.H.to_dataarray()
+        for name, arr in thermal.temperature_fields().items():
+            ds[name] = H_da.copy(data=cp.asnumpy(arr)).rename(name).assign_attrs(
+                units="K", long_name={"T_bed": "basal ice temperature",
+                                      "T_mean": "depth-averaged ice temperature"}[name])
     ds.to_netcdf(f"{OUTPUT_PATH}/level_{level}/inverse_soln.nc")
     save_whitened_params(params, f"{OUTPUT_PATH}/level_{level}/torch_vars.p",
                          bed_parametrization=problem.priors.bed_parametrization)

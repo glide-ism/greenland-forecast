@@ -340,7 +340,7 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: O
 def make_ocean_loader(forcing_dir: Path, ocean_cfg, q0: float, h00: float):
     def load() -> Optional[OceanForcing]:
         path = Path(forcing_dir) / "thermal_forcing.nc"
-        if getattr(ocean_cfg, "pin_front", None):
+        if getattr(ocean_cfg, "pin_front", None) or getattr(ocean_cfg, "pin_front_filename", None):
             raise SystemExit(
                 f"config.ocean_forcing.pin_front={ocean_cfg.pin_front!r}: a projection with the "
                 "calving front pinned to an observed mask is not a projection. The pin is for the "
@@ -352,7 +352,10 @@ def make_ocean_loader(forcing_dir: Path, ocean_cfg, q0: float, h00: float):
         if not path.exists():
             print(f"no thermal forcing at {path}: constant margins q = {q0:g}, h0 = {h00:g} m")
             return None
-        of = OceanForcing.from_file(path, 2 ** config.n_levels, ocean_cfg, q0=q0, h00=h00, lazy=True)
+        rho_path = (Path(config.base_dir) / "model_inputs" / ocean_cfg.rho_filename
+                    if getattr(ocean_cfg, "rho_filename", None) else None)
+        of = OceanForcing.from_file(path, 2 ** config.n_levels, ocean_cfg, q0=q0, h00=h00, lazy=True,
+                                    rho_path=rho_path)
         print(of.describe())
         return of
     return load

@@ -264,6 +264,49 @@ def step_aggregate(years, dtf, schedule, dt_max):
     return out
 
 
+def filtered_dtf(dtf_annual, years, filt, schedule, dt_max):
+    """The annual dTF after a temporal filter ('none' | 'box:N' | 'ema:TAU')
+    and the model's step aggregation (schedule = the config's dt_schedule,
+    () for none)."""
+    d = dtf_annual
+    if filt.startswith('box:'):
+        d = ndimage.uniform_filter1d(d, int(filt[4:]), axis=0, mode='nearest')
+    elif filt.startswith('ema:'):
+        tau = float(filt[4:]); k = 1.0 - np.exp(-1.0 / tau)
+        d = np.empty_like(dtf_annual); acc = np.zeros(dtf_annual.shape[1])
+        for j in range(len(years)):
+            acc = acc + k * (dtf_annual[j] - acc)
+            d[j] = acc
+    elif filt != 'none':
+        raise SystemExit(f"unknown filter {filt!r}")
+    return step_aggregate(years, d, tuple(schedule), dt_max) if len(schedule) else d
+
+
+def ratio_bounds(S, onsets, dtf_stepped, tol, grounded_set='A'):
+    """Per front (in S.fronts order): the front-mean stepped anomaly's maximum
+    over the record (m_all), before the onset window (m1) and through it
+    (m2). With q = 0 a floating cell has F = -h0, so a front flips when
+    alpha_h dTF crosses -h0_base: a stable front needs -h0_base/alpha_h >
+    m_all, a retreat needs it in (m1, m2]."""
+    years = S.years
+    # the anomaly as the front's DIAGNOSTIC set sees it (T where a tongue
+    # exists, else A; the front mean where neither has cells), so the bounds
+    # refer to the same cells flip_years judges
+    use_T = S.fronts.n_T.values >= MIN_TONGUE_CELLS
+    d_T = np.asarray(S.M['T'] @ dtf_stepped.T); d_G = np.asarray(S.M[grounded_set] @ dtf_stepped.T)
+    d_all = np.asarray(S.Mf @ dtf_stepped.T)
+    has_G = (S.fronts[f'n_{grounded_set}'].values > 0)[:, None]
+    dtf_f = np.where(use_T[:, None], d_T, np.where(has_G, d_G, d_all))
+    m_all = dtf_f.max(axis=1)
+    m1 = np.full(len(S.fronts), np.nan); m2 = np.full(len(S.fronts), np.nan)
+    for i, f in enumerate(S.fronts.index):
+        if f in onsets.index and not onsets.stable[f]:
+            lo, hi = onsets.onset_lo[f] - tol, onsets.onset_hi[f] + tol
+            m1[i] = dtf_f[i, years < lo].max() if (years < lo).any() else -np.inf
+            m2[i] = dtf_f[i, years <= hi].max()
+    return m1, m2, m_all
+
+
 # ------------------------------------------------------------- evaluation
 CLASS_W = dict(ok=0.0, early=3.0, spurious=3.0, denied=3.0, late=1.0, missed=1.0, never_adm=1.0, adv=1.0)
 W_OVER_T, W_STATIC_T = 2.0, 1.0        # per table front: transient over-retreat before 2015 / seeded front not admissible
@@ -279,6 +322,10 @@ class Screen:
         self.depth = np.concatenate([cells[k]['depth'] for k in keys])
         self.w = np.concatenate([cells[k]['w'] for k in keys])
         self.strain = np.concatenate([cells[k]['strain'] for k in keys])
+        self.iy = np.concatenate([cells[k]['iy'] for k in keys])
+        self.ix = np.concatenate([cells[k]['ix'] for k in keys])
+        self.rho = None                      # optional critical-anomaly field at the cells (K)
+        self.h0_fixed = None                 # optional fixed-margin override at the cells (m, NaN = formula)
         self.clim, self.ok, self.dtf = clim, ok, dtf
         n = len(self.H)
         fi = {f: i for i, f in enumerate(fronts.index)}
@@ -322,8 +369,25 @@ class Screen:
         """(nt, ncell) margin field, clipped like ocean.py, and its static part."""
         dtf = self.dtf if dtf is None else dtf
         base = h00 + clim_h * np.where(self.ok, self.clim - tf_crit, 0.0)
+        if self.rho is not None:
+            base = base - alpha_h * self.rho
+        h0_t = base[None, :] + alpha_h * dtf_scale * dtf
+        if self.h0_fixed is not None:
+            fx = np.isfinite(self.h0_fixed)
+            base = np.where(fx, self.h0_fixed, base)
+            h0_t = np.where(fx[None, :], self.h0_fixed[None, :], h0_t)
         lo, hi = self.ocfg.h0_bounds
-        return np.clip(base[None, :] + alpha_h * dtf_scale * dtf, lo, hi), np.clip(base, lo, hi)
+        return np.clip(h0_t, lo, hi), np.clip(base, lo, hi)
+
+    def q(self, q0, alpha_q, dtf_scale, dtf=None):
+        """(nt, ncell) q field and its static part: q0 + alpha_q (dTF - rho), as ocean.py."""
+        dtf = self.dtf if dtf is None else dtf
+        base = np.full(len(self.H), float(q0))
+        if self.rho is not None and alpha_q:
+            base = base - alpha_q * self.rho
+        q_t = base[None, :] + alpha_q * dtf_scale * dtf
+        lo, hi = self.ocfg.q_bounds
+        return np.clip(q_t, lo, hi), np.clip(base, lo, hi)
 
     def fractions(self, h0, q, H_c):
         """(nfront, nt) flux-weighted admissible fraction per set for a (nt, ncell)
@@ -336,21 +400,24 @@ class Screen:
         out['Af'] = np.asarray(self.M['A'] @ (adm * floating).T)
         return out
 
-    def evaluate(self, tf_crit, clim_h, alpha_h, h00, q, H_c, dtf_scale, dtf):
+    def evaluate(self, tf_crit, clim_h, alpha_h, h00, q, H_c, dtf_scale, dtf, alpha_q=0.0):
         h0_t, h0_base = self.h0(tf_crit, clim_h, alpha_h, h00, dtf_scale, dtf)
-        fr = self.fractions(h0_t, q, H_c)
-        st = self.fractions(h0_base[None, :], q, H_c)
+        q_t, q_base = self.q(q, alpha_q, dtf_scale, dtf)
+        fr = self.fractions(h0_t, q_t, H_c)
+        st = self.fractions(h0_base[None, :], q_base[None, :], H_c)
         return fr, {s: v[:, 0] for s, v in st.items()}, h0_t, h0_base
 
-    def flip_years(self, fr, st):
-        """Per front: the diagnostic set (T where a tongue exists, else A), its
+    def flip_years(self, fr, st, grounded_set='A'):
+        """Per front: the diagnostic set (T where a tongue exists, else the
+        `grounded_set`: 'A' = the advance beyond the 2015 front, 'term' = the
+        2015 terminus itself, the right one under a bounded field), its
         static admissibility adm0, the seeded terminus' static admissibility
         term0, the first year the set drops below 1/2 (only if admissible
         statically), and the first year the terminus drops below 1/2 (only if
         admissible statically: a transient retreat BEHIND the 2015 front)."""
         use_T = self.fronts.n_T.values >= MIN_TONGUE_CELLS
-        adm0 = np.where(use_T, st['T'], st['A'])
-        series = np.where(use_T[:, None], fr['T'], fr['A'])
+        adm0 = np.where(use_T, st['T'], st[grounded_set])
+        series = np.where(use_T[:, None], fr['T'], fr[grounded_set])
         n = len(self.fronts)
 
         def first(below, gate):
@@ -361,7 +428,7 @@ class Screen:
             return out
         flip = first(series < 0.5, adm0 >= 0.5)
         over = first(fr['term'] < 0.5, st['term'] >= 0.5)
-        return pd.DataFrame(dict(set=np.where(use_T, 'T', 'A'), adm0=adm0, adv_float0=st['Af'], term0=st['term'],
+        return pd.DataFrame(dict(set=np.where(use_T, 'T', grounded_set), adm0=adm0, adv_float0=st['Af'], term0=st['term'],
                                  flip=flip, over=over), index=self.fronts.index)
 
 
@@ -404,13 +471,13 @@ def score(flips, onsets, tol):
     return s, counts, cls
 
 
-def alpha_windows(S, tc, ch, h00, q, H_c, ds_, dtf, onsets, tol, alphas):
+def alpha_windows(S, tc, ch, h00, q, H_c, ds_, dtf, onsets, tol, alphas, grounded_set='A', alpha_q=0.0):
     """For fixed (tf_crit, clim_h): the alpha_h values at which each table
     front is 'ok', as intervals, plus the score per alpha."""
     cls_by_alpha, scores = [], []
     for ah in alphas:
         fr, st, _, _ = S.evaluate(tc, ch, ah, h00, q, H_c, ds_, dtf)
-        fl = S.flip_years(fr, st)
+        fl = S.flip_years(fr, st, gset)
         s, n, cls = score(fl, onsets, tol)
         cls_by_alpha.append(cls)
         scores.append(s)
@@ -458,13 +525,18 @@ def main():
                     help='the alpha_h grid of the per-front feasibility windows')
     ap.add_argument('--h00', type=float, default=None, help='calving_h0 (default: config)')
     ap.add_argument('--q', type=float, default=None, help='calving_q (default: config)')
+    ap.add_argument('--alpha-q', type=float, default=None, help='alpha_q, 1/K (default: config); the field shifts it too')
     ap.add_argument('--H-c', type=float, default=None, help='calving_H_c (default: config)')
     ap.add_argument('--dtf-scale', type=float, nargs='+', default=[1.0],
                     help='multipliers on the TF anomaly, the forcing-uncertainty axis')
     ap.add_argument('--filter', nargs='+', default=['none'],
                     help="temporal filters on the annual dTF before the model's step aggregation: none | box:N "
                          "(N-yr running mean) | ema:TAU (exponential memory, e-folding TAU yr, zero before the record)")
-    ap.add_argument('--schedule', default='1850:10,1990:1', help="the model's dt_schedule; 'annual' for none")
+    ap.add_argument('--schedule', default='config', help="'config' (the domain's dt_schedule), 'annual', or 'T0:DT,T1:DT'")
+    ap.add_argument('--rho', default=None, help='a calving_rho.nc to evaluate WITH (verifies a built field; honours its h0_fixed)')
+    ap.add_argument('--grounded-set', default=None, choices=['A', 'term'],
+                    help="the diagnostic set of grounded fronts: 'A' (advance beyond the 2015 front; default without --rho) "
+                         "or 'term' (the 2015 terminus; default with a bounded --rho, whose h0_fixed forbids advance)")
     ap.add_argument('--tol', type=float, default=3.0, help='years beyond the onset window still scored ok')
     ap.add_argument('--windows', type=int, default=3, help='print the alpha windows for the config combo + this many best (tf_crit, clim_h)')
     ap.add_argument('--detail', action='append', default=[], help='tf_crit,clim_h,alpha_h[,dtf_scale[,filter]] to dump a timeline')
@@ -476,9 +548,10 @@ def main():
     ocfg = cfg.ocean_forcing
     h00 = cfg.calving_h0 if a.h00 is None else a.h00
     q = cfg.calving_q if a.q is None else a.q
+    alpha_q = ocfg.alpha_q if a.alpha_q is None else a.alpha_q
     H_c = cfg.calving_H_c if a.H_c is None else a.H_c
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    print(f"config {cfg.results_subdir}: calving_q {q:g}, calving_h0 {h00:g} m, H_c {H_c:g} m, timescale {cfg.calving_timescale:g} yr, "
+    print(f"config {cfg.results_subdir}: calving_q {q:g} (alpha_q {alpha_q:g}/K), calving_h0 {h00:g} m, H_c {H_c:g} m, timescale {cfg.calving_timescale:g} yr, "
           f"TF statistic {ocfg.statistic}, ref {ocfg.ref_years}, max_dist {ocfg.max_dist_km:g} km, "
           f"h0 bounds {ocfg.h0_bounds}; config margins tf_crit {ocfg.tf_crit:g} / clim_h {ocfg.clim_h:g} / "
           f"alpha_h {ocfg.alpha_h:g}" + (f" (pin_front={ocfg.pin_front})" if ocfg.pin_front else ''))
@@ -500,29 +573,28 @@ def main():
     fronts['onset'] = fronts.index.map(lambda f: onsets.onset_str.get(f, ''))
 
     # ---------------------------------------------------------- the census
-    schedule = () if a.schedule == 'annual' else tuple((float(s.split(':')[0]), float(s.split(':')[1])) for s in a.schedule.split(','))
-    dtf_by_smooth = {}
-    for sm in a.filter:
-        d = dtf_annual
-        if sm.startswith('box:'):
-            d = ndimage.uniform_filter1d(d, int(sm[4:]), axis=0, mode='nearest')
-        elif sm.startswith('ema:'):
-            tau = float(sm[4:]); k = 1.0 - np.exp(-1.0 / tau)
-            d = np.empty_like(dtf_annual); acc = np.zeros(dtf_annual.shape[1])
-            for j in range(len(years)):
-                acc = acc + k * (dtf_annual[j] - acc)
-                d[j] = acc
-        elif sm != 'none':
-            raise SystemExit(f"unknown filter {sm!r}")
-        dtf_by_smooth[sm] = step_aggregate(years, d, schedule, cfg.dt) if schedule else d
-    dtf_f = np.asarray(S.Mf @ dtf_by_smooth[a.filter[0]].T)              # (nfront, nt) the front's stepped anomaly
-    m_all = dtf_f.max(axis=1)
-    m1 = np.full(len(fronts), np.nan); m2 = np.full(len(fronts), np.nan)
-    for i, f in enumerate(fronts.index):
-        if f in onsets.index and not onsets.stable[f]:
-            lo, hi = onsets.onset_lo[f] - a.tol, onsets.onset_hi[f] + a.tol
-            m1[i] = dtf_f[i, years < lo].max() if (years < lo).any() else -np.inf
-            m2[i] = dtf_f[i, years <= hi].max()
+    if a.schedule == 'config':
+        schedule = tuple(cfg.dt_schedule)
+    elif a.schedule == 'annual':
+        schedule = ()
+    else:
+        schedule = tuple((float(s.split(':')[0]), float(s.split(':')[1])) for s in a.schedule.split(','))
+    dtf_by_smooth = {sm: filtered_dtf(dtf_annual, years, sm, schedule, cfg.dt) for sm in a.filter}
+    gset = a.grounded_set or 'A'
+    if a.rho:
+        with xr.open_dataset(a.rho) as rf:
+            rds = crop_to_factor(rf, 2 ** N_LEVELS)
+            rho_full = rds['calving_rho'].values
+            fixed_full = rds['h0_fixed'].values if 'h0_fixed' in rds else None
+        S.rho = np.nan_to_num(rho_full[S.iy, S.ix].astype('float64'), nan=0.0)
+        print(f"critical-anomaly field {a.rho}: rho at the diagnostic cells 10/50/90 pct "
+              f"{np.percentile(S.rho, [10, 50, 90]).round(2)} K -- h0 = ... + alpha_h (dTF - rho)")
+        if fixed_full is not None:
+            S.h0_fixed = fixed_full[S.iy, S.ix].astype('float64')
+            gset = a.grounded_set or 'term'
+            print(f"  h0_fixed on {int(np.isfinite(S.h0_fixed).sum())} of {len(S.h0_fixed)} diagnostic cells "
+                  f"(bounded field); grounded fronts judged on their '{gset}' set")
+    m1, m2, m_all = ratio_bounds(S, onsets, dtf_by_smooth[a.filter[0]], a.tol, gset)
     fronts['dtf_max'] = m_all; fronts['dtf_max_before_onset'] = m1; fronts['dtf_max_through_onset'] = m2
     print("\n=== STATIC CENSUS ===")
     c = fronts[np.isfinite(fronts.tf_clim)].sort_values('tf_clim')
@@ -577,11 +649,11 @@ def main():
     combos = list(itertools.product(a.tf_crit, a.clim_h, a.alpha_h, a.dtf_scale, a.filter))
     wdesc = ' '.join(f"{k} {v:g}" for k, v in CLASS_W.items() if v) + f" over<2015 {W_OVER_T:g} static-cut {W_STATIC_T:g}"
     print(f"\n=== FLIP-YEAR BOX: {len(combos)} combos x {len(fronts)} fronts x {len(years)} years "
-          f"(schedule {a.schedule}, tol {a.tol:g} yr; weights per table front: {wdesc}) ===")
+          f"(schedule {schedule or 'annual'}, tol {a.tol:g} yr; weights per table front: {wdesc}) ===")
     results, flips_all = [], {}
     for (tc, ch, ah, ds_, sm) in combos:
-        fr, st, h0_t, h0_base = S.evaluate(tc, ch, ah, h00, q, H_c, ds_, dtf_by_smooth[sm])
-        fl = S.flip_years(fr, st)
+        fr, st, h0_t, h0_base = S.evaluate(tc, ch, ah, h00, q, H_c, ds_, dtf_by_smooth[sm], alpha_q)
+        fl = S.flip_years(fr, st, gset)
         s, n, cls = score(fl, onsets, a.tol)
         results.append(dict(tf_crit=tc, clim_h=ch, alpha_h=ah, dtf_scale=ds_, filter=sm, score=s, **n,
                             all_flip_pre1990=int((fl.flip < 1990).sum()), all_flip_by2025=int(np.isfinite(fl.flip).sum()),
@@ -596,8 +668,8 @@ def main():
     print(res[cols].head(a.top).to_string(index=False))
     key_cfg = (ocfg.tf_crit, ocfg.clim_h, ocfg.alpha_h, 1.0, a.filter[0])
     if key_cfg not in flips_all:
-        fr, st, _, _ = S.evaluate(*key_cfg[:3], h00, q, H_c, 1.0, dtf_by_smooth[a.filter[0]])
-        fl = S.flip_years(fr, st)
+        fr, st, _, _ = S.evaluate(*key_cfg[:3], h00, q, H_c, 1.0, dtf_by_smooth[a.filter[0]], alpha_q)
+        fl = S.flip_years(fr, st, gset)
         s, n, cls = score(fl, onsets, a.tol)
         flips_all[key_cfg] = (fl, cls)
         print(f"\nconfig combo {key_cfg[:3]}: score {s:g} {n}")
@@ -647,7 +719,7 @@ def main():
     grid = list(itertools.product(sorted(set(a.tf_crit) | {ocfg.tf_crit}), sorted(set(a.clim_h) | {ocfg.clim_h})))
     per_grid = {}
     for tc, ch in grid:
-        w, sc, C = alpha_windows(S, tc, ch, h00, q, H_c, 1.0, dtf_by_smooth[a.filter[0]], onsets, a.tol, alphas)
+        w, sc, C = alpha_windows(S, tc, ch, h00, q, H_c, 1.0, dtf_by_smooth[a.filter[0]], onsets, a.tol, alphas, gset, alpha_q)
         n_ok = (C == 'ok').sum(axis=0).values
         j = int(np.argmin(sc))
         per_grid[(tc, ch)] = (w, sc, C)
@@ -687,7 +759,7 @@ def main():
         tc, ch, ah = v[:3]
         ds_ = v[3] if len(v) > 3 else 1.0
         sm = str(v[4]) if len(v) > 4 else a.filter[0]
-        fr, st, h0_t, h0_base = S.evaluate(tc, ch, ah, h00, q, H_c, ds_, dtf_by_smooth.get(sm, dtf_by_smooth[a.filter[0]]))
+        fr, st, h0_t, h0_base = S.evaluate(tc, ch, ah, h00, q, H_c, ds_, dtf_by_smooth.get(sm, dtf_by_smooth[a.filter[0]]), alpha_q)
         h0_f = np.asarray(S.Mf @ h0_t.T)
         rows = []
         for i, f in enumerate(fronts.index):

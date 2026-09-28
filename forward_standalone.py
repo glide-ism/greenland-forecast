@@ -82,9 +82,14 @@ BETA_MAX = 20.0                   # cap on the basal traction coefficient (the e
 # raw one. None = the raw layout. tools/vti_compress.py applies the same to
 # existing runs; ismip_exporter.read_vti reads both.
 VTI_COMPRESSOR = "lz4"
+VTI_T_MIN = None                  # write VTI frames only for step ends >= this year (None = all):
+                                  # a sweep keeps the observational period and nothing before it
+VTI_FIELDS = None                 # subset of the dynamic field names to write (None = all)
+STATE_SAVE_TIMES = ()             # step ends at which the raw state is saved to {out_dir}/state_{t}.nc
+                                  # (a restart point; the observation epochs for a sweep evaluation)
 VTI_PRECISION = {"H": 0.01, "srf": 0.01, "dhdt": 1e-3, "smb": 1e-3, "U": 0.01, "U_s": 0.01, "U_b": 0.01,
                  "q": 1e-4, "h0": 0.01, "tf_anom": 1e-3, "xi": 1e-4, "phi": 1e-4, "psi": 1e-4,
-                 "bed": 0.01, "beta": 1e-3}
+                 "bed": 0.01, "beta": 1e-3, "T_bed": 0.01, "T_mean": 0.01, "omega_w_bed": 1e-5}
 VTI_MASKED_FIELDS = ("U", "U_s", "U_b", "smb", "dhdt")
 # --- ocean forcing: None -> config.ocean_forcing, or an override such as
 # dataclasses.replace(config.ocean_forcing, alpha_q=0.0, alpha_h=50.0)
@@ -181,6 +186,13 @@ def load_ocean_forcing() -> Optional[OceanForcing]:
     if not OCEAN.enabled:
         print(f"ocean forcing disabled: constant margins q = {Q0:g}, h0 = {H00:g} m")
         return None
+    if getattr(OCEAN, "pin_front_filename", None):
+        # the TIME-VARYING pin (yearly TermPicks masks, preprocessing/make_front_mask.py)
+        from glacier_inverse.ocean import PinnedFront
+        of = PinnedFront.from_file(Path(config.base_dir) / "model_inputs" / OCEAN.pin_front_filename,
+                                   2 ** config.n_levels, OCEAN, q0=Q0, h00=H00)
+        print(of.describe())
+        return of
     if OCEAN.pin_front:
         # the same pin the inversion ran with (ocean.PinnedFront); the mask is
         # read from the gridded inputs on the model crop, no TF file
@@ -459,6 +471,17 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
                     attrs={"long_name": "Ocean thermal forcing anomaly driving q (0 where inactive)"})
     ctx.ocean = (load_ocean_forcing if ocean_loader is None else ocean_loader)()
 
+    ### Thermomechanical coupling (config.thermal; library change 18): the
+    ### same ThermalDriver the inverse uses, spun up in run() before the loop
+    ctx.thermal = None
+    tcfg = getattr(config, "thermal", None)
+    if tcfg is not None:
+        from glacier_inverse.thermal import ThermalDriver, surface_temperature_fine
+        ctx.thermal = ThermalDriver(model, level, tcfg, rho_i=float(config.rho_ice),
+                                    thin_B=float(config.B_rate) if tcfg.thin_ice_isothermal else None)
+        ctx.thermal_T_surface = surface_temperature_fine(t2m, tbias if tcfg.surface_T_tbias else None)
+        print(f"thermal coupling: {tcfg}")
+
     rho_ratio = config.rho_ice / config.rho_water
 
     def update_derived(dt_step):
@@ -477,12 +500,18 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
                            compressor=VTI_COMPRESSOR, precision=VTI_PRECISION,
                            mask_field="mask", masked_fields=VTI_MASKED_FIELDS,
                            static_fields={"bed": lvl.geometry.bed, "beta": lvl.sliding.beta},
-                           dynamic_fields={"H": lvl.state.H, "srf": srf, "dhdt": dhdt,
-                                           "U": [lvl.state.u, lvl.state.v], "U_s": [u_s, v_s],
-                                           "U_b": [u_b, v_b], "smb": lvl.forcing.smb,
-                                           "mask": lvl.state.mask, "xi": lvl.state.xi,
-                                           "phi": lvl.state.phi, "psi": lvl.state.psi,
-                                           "q": lvl.calving.q, "h0": lvl.calving.h0, "tf_anom": tf_anom})
+                           dynamic_fields={k: v for k, v in
+                                           {"H": lvl.state.H, "srf": srf, "dhdt": dhdt,
+                                            "U": [lvl.state.u, lvl.state.v], "U_s": [u_s, v_s],
+                                            "U_b": [u_b, v_b], "smb": lvl.forcing.smb,
+                                            "mask": lvl.state.mask, "xi": lvl.state.xi,
+                                            "phi": lvl.state.phi, "psi": lvl.state.psi,
+                                            "q": lvl.calving.q, "h0": lvl.calving.h0, "tf_anom": tf_anom,
+                                            **({"T_bed": lambda: ctx.thermal.fields()["T_bed"],
+                                                "T_mean": lambda: ctx.thermal.fields()["T_mean"],
+                                                "omega_w_bed": lambda: ctx.thermal.fields()["omega_w_bed"],
+                                                "B": lvl.rheology.B} if ctx.thermal is not None else {})}.items()
+                                           if VTI_FIELDS is None or k in VTI_FIELDS})
     vti_writer.initialize(lvl)
 
     ctx.model, ctx.mg, ctx.lvl, ctx.gd, ctx.crs = model, mg, lvl, gd, crs
@@ -507,6 +536,35 @@ def dynamics_step(ctx: Run, t_prev: float, dt_step: float) -> None:
     ctx.model.forward(cp.float32(t_prev), cp.float32(dt_step), update_geometry=False)
 
 
+def save_state(ctx: Run, t: float) -> Path:
+    """The model state on the run level at a step end, RAW (nothing masked
+    or rounded): H, surface, the staggered surface velocity u_s (ny, nx+1) /
+    v_s (ny+1, nx), the step's SMB, the active-set mask and phi. A restart
+    point for branches that share the spin-up, and exactly what the
+    inversion's observation terms consume (analysis/sweep_calving_eval.py
+    rebuilds a ModelState from it), which the VTI frames are not: they mask
+    SMB and velocity off the ice and round."""
+    lvl, gd, level = ctx.lvl, ctx.gd, ctx.level
+    ny, nx = gd.sizes["y"], gd.sizes["x"]
+    f32 = lambda a: cp.asarray(np.asarray(a), dtype=cp.float32)
+    yc = restrict(f32(np.broadcast_to(gd.y.values[:, None], (ny, nx))), level)[:, 0]
+    xc = restrict(f32(np.broadcast_to(gd.x.values[None, :], (ny, nx))), level)[0, :]
+    out = xr.Dataset(coords={"y": cp.asnumpy(yc), "x": cp.asnumpy(xc)})
+    enc = {}
+    for name, arr, dims in [("H", lvl.state.H.data, ("y", "x")), ("srf", ctx.srf.data, ("y", "x")),
+                            ("u_s", ctx.u_s.data, ("y", "xs")), ("v_s", ctx.v_s.data, ("ys", "x")),
+                            ("smb", lvl.forcing.smb.data, ("y", "x")), ("mask", lvl.state.mask.data, ("y", "x")),
+                            ("phi", lvl.state.phi.data, ("y", "x"))]:
+        out[name] = xr.DataArray(cp.asnumpy(arr), dims=dims)
+        enc[name] = dict(zlib=True, complevel=4)
+    out.attrs.update(time=float(t), level=level, n_glen=float(config.n_glen),
+                     note="u_s / v_s are the STAGGERED surface velocities (u + ud/(n+1)); smb unmasked; mask = active set")
+    path = ctx.out_dir / f"state_{t:g}.nc"
+    out.to_netcdf(path, encoding=enc)
+    print(f"saved state at t = {t:g} to {path}", flush=True)
+    return path
+
+
 def run(ctx: Run) -> None:
     model, mg, lvl, gd, crs = ctx.model, ctx.mg, ctx.lvl, ctx.gd, ctx.crs
     level, out_dir = ctx.level, ctx.out_dir
@@ -521,33 +579,55 @@ def run(ctx: Run) -> None:
                               dt_schedule=DT_SCHEDULE)
     ends = [t for t, _ in seq]
     steps = list(zip([float(T_START)] + ends[:-1], ends))
+    if ctx.thermal is not None:
+        H0 = lvl.state.H.data.copy()
+
+        def _momentum_solve():
+            mg.forcing.smb.set(0.0, start_level=level)
+            lvl.state.H.data[:] = H0
+            dynamics_step(ctx, float(T_START), float(ctx.thermal.cfg.spinup_momentum_dt))
+        ctx.thermal.spinup(H0=H0, momentum_solve=_momentum_solve, T_surface_fine=ctx.thermal_T_surface)
+        lvl.state.H.data[:] = H0
     for t_prev, t_next in steps:
         dt_step = t_next - t_prev
         print(f"Solving forward problem at t={t_prev:.2f} with dt={dt_step:.2f}", flush=True)
         mg.forcing.smb.set(restrict(ctx.compute_smb(t_prev, t_next), level), start_level=level)
         ocean_forcing(t_prev, dt_step, mg, level, ctx)
+        if ctx.thermal is not None:
+            ctx.thermal.pre_step(lvl.state.H.data)
         dynamics_step(ctx, t_prev, dt_step)
+        if ctx.thermal is not None:
+            ctx.thermal.post_step(dt_step)
         ctx.update_derived(dt_step)
-        vti_writer.append(lvl, time=float(t_next))
-        vti_writer.write_pvd()
+        if VTI_T_MIN is None or t_next >= float(VTI_T_MIN) - 1e-6:
+            vti_writer.append(lvl, time=float(t_next))
+            vti_writer.write_pvd()
+        if any(abs(t_next - float(ts)) < 1e-6 for ts in STATE_SAVE_TIMES):
+            save_state(ctx, t_next)
 
     ### Final state to NetCDF (cell-centred fields on the run level)
     yc = restrict(f32(np.broadcast_to(gd.y.values[:, None], (ny, nx))), level)[:, 0]
     xc = restrict(f32(np.broadcast_to(gd.x.values[None, :], (ny, nx))), level)[0, :]
     out = xr.Dataset(coords={"y": cp.asnumpy(yc), "x": cp.asnumpy(xc)})
-    for name, arr in [("H", lvl.state.H.data), ("srf", srf.data), ("dhdt", dhdt.data),
+    for name, arr in ([("H", lvl.state.H.data), ("srf", srf.data), ("dhdt", dhdt.data),
                       ("bed", lvl.geometry.bed.data), ("beta", lvl.sliding.beta.data),
                       ("smb", lvl.forcing.smb.data), ("mask", lvl.state.mask.data),
                       ("xi", lvl.state.xi.data), ("phi", lvl.state.phi.data), ("psi", lvl.state.psi.data),
                       ("q", lvl.calving.q.data), ("h0", lvl.calving.h0.data), ("tf_anom", ctx.tf_anom.data),
                       ("u_s", 0.5 * (u_s.data[:, 1:] + u_s.data[:, :-1])),
-                      ("v_s", 0.5 * (v_s.data[1:, :] + v_s.data[:-1, :]))]:
+                      ("v_s", 0.5 * (v_s.data[1:, :] + v_s.data[:-1, :]))]
+                      + (list(ctx.thermal.fields().items()) if ctx.thermal is not None else [])):
         out[name] = xr.DataArray(cp.asnumpy(arr), dims=("y", "x"))
     out.attrs.update(level=level, t_start=float(T_START), t_end=float(T_END), dt=float(DT),
                      dt_schedule=repr(DT_SCHEDULE), n_steps=len(steps),
+                     calving_timescale=float(config.calving_timescale), calving_H_c=float(config.calving_H_c),
+                     calving_q=float(Q0), calving_h0=float(H00),
                      checkpoint=str(CHECKPOINT), crs_wkt=crs.to_wkt(),
                      ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
-                                    else f"constant margins q = {Q0:g}, h0 = {H00:g} m"))
+                                    else f"constant margins q = {Q0:g}, h0 = {H00:g} m"),
+                     A_glen=float(config.A_glen),
+                     thermal=(repr(ctx.thermal.cfg) if ctx.thermal is not None else "none (isothermal A_glen)"),
+                     thermal_spinup=(repr(ctx.thermal.spinup_info) if ctx.thermal is not None else ""))
     out.to_netcdf(out_dir / "forward_soln.nc")
     print(f"wrote {out_dir / 'forward_soln.nc'}; VTI series in {vti_dir}")
 

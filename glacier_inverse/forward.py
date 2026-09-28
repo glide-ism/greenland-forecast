@@ -501,6 +501,8 @@ def simulate(
     yearly_climate=None,
     interannual_sigma: Optional[float] = None,
     interannual_nodes: int = 3,
+    thermal=None,
+    thermal_T_surface=None,
 ) -> SimResult:
     """Run the forward model on coarse `level` over a snapped step sequence.
 
@@ -563,6 +565,12 @@ def simulate(
     among themselves. The index precip multiplier likewise applies only to
     the remaining years. In "end" mode a step whose end year is on record is
     the whole-step evaluation on that year.
+
+    `thermal` (a thermal.ThermalDriver for this level, or None) couples the
+    enthalpy model: a frozen-geometry thermal spin-up on the initial state
+    (surface temperature `thermal_T_surface`, fine grid, K), then one enthalpy
+    step after every dynamics step, each updating glide's B. No gradient flows
+    through it (GlideStep checkpoints the B each step used).
     """
     record_states_at = [float(t) for t in (record_states_at or [])]
     record_volumes_at = [float(t) for t in (record_volumes_at or [])]
@@ -629,6 +637,13 @@ def simulate(
     # discarded - the online check that grad_start_time is early enough.
     H_boundary = None
     prev_no_grad = False
+    if thermal is not None:
+        def _momentum_solve():
+            glide_step(cp.float32(t_start), cp.float32(thermal.cfg.spinup_momentum_dt),
+                       model, level, H_prev_.detach(), bed_.detach(), beta_.detach(),
+                       torch.zeros_like(H_prev_).detach())
+        thermal.spinup(H0=H_prev_, momentum_solve=_momentum_solve,
+                       T_surface_fine=thermal_T_surface)
     for t_next, dt_step in steps:
         no_grad_step = (grad_start_time is not None
                         and t_next <= grad_start_time + 1e-6)
@@ -717,6 +732,8 @@ def simulate(
             model.mg.calving.q.set(_restrict_cupy(q_f, level), start_level=level)
             model.mg.calving.h0.set(_restrict_cupy(h0_f, level), start_level=level)
 
+        if thermal is not None:
+            thermal.pre_step(H_prev_)
         if no_grad_step:
             # Truncated-backprop spin-up: full physics, no graph - so no
             # checkpoint (it would only warn about grad-free inputs), no
@@ -733,6 +750,8 @@ def simulate(
             u, v, ud, vd, H, active = glide_step(
                 cp.float32(t_prev), cp.float32(dt_step),
                 model, level, H_prev_, bed_, beta_, smb_)
+        if thermal is not None:
+            thermal.post_step(dt_step)
         # `H_prev_` here is the thickness emitted by the previous step (the input
         # to this one); capturing it before the reassignment leaves it holding
         # the second-to-last emitted thickness once the loop ends.

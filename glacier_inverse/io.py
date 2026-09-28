@@ -42,8 +42,19 @@ def make_diagnostic_fields(mg_level) -> DiagnosticFields:
                             dhdt=_empty())
 
 
-def make_loss_vti_writer(mg_level, output_dir: str, base: str, diag: DiagnosticFields) -> VTIWriter:
-    """VTI writer for per-iteration loss diagnostics."""
+def _thermal_vti_fields(thermal) -> dict:
+    """T_bed / T_mean (K) as write-time callables when a thermal.ThermalDriver
+    is given (config.thermal), else nothing."""
+    if thermal is None:
+        return {}
+    return {"T_bed": lambda: thermal.temperature_fields()["T_bed"],
+            "T_mean": lambda: thermal.temperature_fields()["T_mean"]}
+
+
+def make_loss_vti_writer(mg_level, output_dir: str, base: str, diag: DiagnosticFields,
+                         thermal=None) -> VTIWriter:
+    """VTI writer for per-iteration loss diagnostics (+ T_bed / T_mean with
+    a thermal driver)."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     writer = VTIWriter(
         output_dir, base=base, dx=mg_level.dx,
@@ -63,14 +74,17 @@ def make_loss_vti_writer(mg_level, output_dir: str, base: str, diag: DiagnosticF
             "bed_mean": diag.bed_mean,
             "dhdt": diag.dhdt,
             "smb": mg_level.forcing.smb,
+            **_thermal_vti_fields(thermal),
         },
     )
     writer.initialize(mg_level)
     return writer
 
 
-def make_time_vti_writer(mg_level, output_dir: str, base: str = "time") -> VTIWriter:
-    """VTI writer for per-time-step diagnostics."""
+def make_time_vti_writer(mg_level, output_dir: str, base: str = "time",
+                         thermal=None) -> VTIWriter:
+    """VTI writer for per-time-step diagnostics (+ T_bed / T_mean with a
+    thermal driver)."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     return VTIWriter(
         output_dir, base=base, dx=mg_level.dx,
@@ -78,6 +92,7 @@ def make_time_vti_writer(mg_level, output_dir: str, base: str = "time") -> VTIWr
             "thk": mg_level.state.H,
             "U": [mg_level.state.u, mg_level.state.v],
             "smb": mg_level.forcing.smb,
+            **_thermal_vti_fields(thermal),
         },
     )
 

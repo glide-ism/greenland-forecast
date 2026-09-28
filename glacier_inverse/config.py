@@ -341,6 +341,82 @@ class OceanForcingConfig:
     pin_front: Optional[str] = None
     pin_h0_inside: float = -1000.0
     pin_h0_outside: float = 250.0
+    # TIME-VARYING pin (2026-09-25): a file under model_inputs/ with
+    # `front_mask(time, y, x)` per calendar year (preprocessing/
+    # make_front_mask.py from TermPicks: the 2015 inventory plus the fjord
+    # cells landward of each year's observed terminus, minus those seaward);
+    # each step is pinned to the mask of its END year, the first mask held
+    # before the record and the last after. Takes precedence over
+    # `pin_front`; the margins are the same pin_h0_inside / _outside.
+    pin_front_filename: Optional[str] = None
+    # CRITICAL-ANOMALY FIELD (2026-09-24, library change 16): a per-cell
+    # rho(x) in kelvin from model_inputs/<rho_filename> (variable
+    # `calving_rho`, preprocessing/make_calving_rho.py) enters the margin as
+    #     h0 = calving_h0 + clim_h (TF_clim - tf_crit) + alpha_h (dTF - rho)
+    # so a front flips exactly when its anomaly exceeds rho: rho is the
+    # front's distance to threshold in the reference climate, alpha_h the
+    # metres of margin per kelvin of exceedance (the extent of a grounded
+    # retreat). Why a field: under the monotone law the whole TF response of
+    # a front is the one ratio -h0_base / alpha_h, and the observed onsets
+    # need ratios that are not a function of TF_clim (Petermann and
+    # Zachariae share TF_clim 2.27 and need 0.3 and 1.2 K), so no
+    # (tf_crit, clim_h, alpha_h) times them -- analysis/calving_screen.py.
+    # With the field, set clim_h = 0 and calving_h0 = 0 (the builder derives
+    # rho assuming the static margin is -alpha_h rho alone). NaN / missing
+    # cells contribute 0; None = no field. The pin ignores it.
+    rho_filename: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ThermalConfig:
+    """Thermomechanical coupling (see glacier_inverse/thermal.py; glide's
+    enthalpy model, ThermalModel). None on GlacierConfig.thermal = the
+    isothermal rheology B from A_glen (the Alaska behaviour).
+
+    Every forward run starts with a THERMAL SPIN-UP on the initial geometry:
+    a momentum solve for the velocities, then implicit enthalpy steps of
+    `spinup_dt` years with geometry and velocity frozen until the mean basal
+    temperature change over ice thicker than 100 m falls below `spinup_tol_K`
+    (at most `spinup_max_steps`), then B is set from the equilibrium and the
+    cycle is repeated `spinup_outer` times so the velocities see the thermal
+    rheology. Afterwards one enthalpy step follows every dynamics step and B
+    is updated per step (restricted to every coarser level; glide's GlideStep
+    checkpoints it). The thermal state carries NO gradient: B is a frozen
+    input to the adjoint, like the calving margins.
+
+    Rheology: Paterson-Budd on the pressure-adjusted temperature with the
+    Lliboutry-Duval water softening (capped at 1 %), collapsed to one B per
+    column with `weighting` ('shear': A weighted by (1 - sigma)^n, the
+    shallow-ice deformation weighting; 'mean': plain depth mean), times the
+    `enhancement` factor. Surface temperature: the annual mean of the monthly
+    climatology t2m (+ tbias when `surface_T_tbias`), capped at 0 degC, held
+    fixed through the run (no anomaly: the ice-temperature response to the
+    interannual record is second order for A; a known simplification).
+    `Q_geo` is a uniform geothermal flux (W/m^2) until a product is added.
+    `thin_ice_isothermal` gives columns thinner than `h_thin` (and the
+    ice-free cells) the isothermal B of A_glen instead of their cold
+    surface-clamped value (up to 2x the interior's B); opt-in, the evidence
+    that it helps the 1 km solve was mixed (2026-09-27)."""
+    nz: int = 9
+    n_smooth: int = 60                 # max enthalpy sweeps per step
+    Q_geo: float = 0.05                # W/m^2
+    weighting: str = "shear"
+    enhancement: float = 1.0           # multiplies the collapsed A
+    frictional_heating: bool = True
+    strain_heating: bool = True
+    surface_T_tbias: bool = True
+    spinup_dt: float = 1000.0          # yr, thermal-only steps
+    spinup_max_steps: int = 300
+    spinup_tol_K: float = 1e-3
+    spinup_outer: int = 2
+    spinup_momentum_dt: float = 1.0    # yr, the momentum solve giving the spin-up velocities
+    h_thin: float = 25.0               # m, thinner columns are clamped to the surface
+    lf_c: float = 1e-4                 # Lax-Friedrichs coefficient of the enthalpy advection
+    n_newton: int = 5
+    absolute_tolerance: float = 1e-6   # max |r|, scaled units; 1e-3 left the spin-up smoother-limited (0.2 K, 2 % in B)
+    warm_start: bool = True            # start each spin-up from the previous run's E (same level)
+    thin_ice_isothermal: bool = False  # B of A_glen where H < h_thin (see above)
+    report: bool = True
 
 
 @dataclass(frozen=True)
@@ -881,6 +957,10 @@ class GlacierConfig:
 
     # Ocean thermal forcing of the calving margins. See OceanForcingConfig.
     ocean_forcing: OceanForcingConfig = field(default_factory=OceanForcingConfig)
+
+    # Thermomechanical coupling (library change 18). None = isothermal B from
+    # A_glen. See ThermalConfig.
+    thermal: Optional[ThermalConfig] = None
 
     # Input filenames (relative to base_dir/model_inputs/)
     gridded_filename:    str = "GLIDE_inputs.nc"
