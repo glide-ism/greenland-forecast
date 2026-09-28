@@ -1103,9 +1103,24 @@ near the margins at coarse levels is the blunter alternative.
    run 343 / 166 s; end states differ by 7e-4 in volume, median |dH| 1.4 cm
    -- probably the solves ending unconverged at the floors, not
    confirmed). glide tests: grad 0.31 % (HEAD 0.85 %), jvp / adjoint / ssa
-   unchanged. Backtracking is still needed (the coarse correction at the
-   Scoresby Sund fjord); `cold_start_dt` is now insurance, not a
-   requirement. Not done: a patch line search / adaptive LM damping.
+   unchanged. **REVERTED the same day (glide 768879e, user: 'super broken'):
+   the incremental safeguard breaks WARM-STARTED solves** -- the thermal
+   spin-up's second momentum solve (dt 1, velocities from the first solve,
+   new equilibrium B) diverged in its first V-cycle (r_ud 7e9) and ended
+   unconverged, where the previous glide converges it in 1 V-cycle; the first
+   real step then failed the same way after the cold-start pre-solve. Claude
+   missed it because the run summary counted only the solves AFTER the
+   spin-up, and the single-level harness (`sweep_track.py`: smoothing against
+   gamma = thklim) is NOT the V-cycle's first sweep (FASCD pre-smoothing uses
+   the local constraint w_H + phi): the previous glide also 'blows up' in it on
+   that dump while its V-cycle converges, so the harness's 'pure smoothing is
+   stable' readings are not evidence. After the revert, inverse.py from
+   inverse_v14/level_0 (one iteration, forward + backward + final
+   evaluation): spin-up solves 2 + 2 V-cycles, 282 solves, 9 capped at the
+   floors, no NaN. STANDING: the cold-start sign flip of the ud / vd
+   diagonals is real and diagnosed; `cold_start_dt` (1.0) + backtracking is
+   what handles it. A correct fix must be tested on warm-started solves and
+   through inverse.py, not only cold first steps.
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
