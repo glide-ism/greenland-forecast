@@ -139,6 +139,12 @@ def _apply_solver_settings(solver, cfg: SolverConfig) -> None:
     solver.vanka_options.omega.set(cp.float32(cfg.omega))
     solver.vanka_options.newton_options.momentum_damping.set(cp.float32(cfg.momentum_damping))
     solver.vanka_options.newton_options.step_tolerance.set(cp.float32(cfg.step_tolerance))
+    if "freeze_coarse_calving" in getattr(solver.fas_options, "options", ()):   # forward solver only
+        solver.fas_options.set(freeze_coarse_calving=cfg.freeze_coarse_calving,
+                               freeze_coarse_phi=cfg.freeze_coarse_phi,
+                               trace_file=cfg.trace_file, trace_every=cfg.trace_every,
+                               dump_dir=cfg.dump_dir, dump_max=cfg.dump_max,
+                               backtrack=cfg.backtrack, backtrack_scales=tuple(cfg.backtrack_scales))
 
 
 def _crop_to_factor(gridded_data: xr.Dataset, factor: int) -> xr.Dataset:

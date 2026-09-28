@@ -68,7 +68,7 @@ CONFIG = GlacierConfig(
     base_dir=str(_HERE),
     vti_base_name="greenland",
     gridded_filename=_GRIDDED_FILE,
-    results_subdir=f"inverse_v12",
+    results_subdir=f"inverse_v14",
     smb_model="enthalpy",
     anomaly_integration="mean_anomaly",
     #anomaly_filename = "temperature_anomaly_flat.nc",
@@ -227,10 +227,10 @@ CONFIG = GlacierConfig(
     # first momentum solve). Thermal spin-up at the start of every run.
     thermal=ThermalConfig(nz=9, Q_geo=0.042, weighting="mean"),
     # ---- FAS / Vanka settings from the same example, both solvers
-    forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
-                                finest_steps=150, relative_tolerance=1e-2,
+    forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=50,
+                                finest_steps=0, relative_tolerance=1e-2,
                                 absolute_tolerance=10.0, report_norms=True,
-                                omega=0.5, momentum_damping=1.0, step_tolerance=1e-6),
+                                omega=0.5, momentum_damping=1.0, step_tolerance=1e-6,backtrack=True,dump_dir='./dump',dump_max=10),
     adjoint_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,
                                 absolute_tolerance=1e-5, report_norms=True,

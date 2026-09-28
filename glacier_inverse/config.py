@@ -284,6 +284,34 @@ class SolverConfig:
     omega: float = 0.5
     momentum_damping: float = 0.01
     step_tolerance: float = 1e-6
+    # Coarse-level calving in the FORWARD FAS cycle (glide FASCDConfig; the
+    # adjoint cycle has no switch and always runs the sink on the restricted
+    # psi). True = the historical behaviour: calving rate 0 on every coarse
+    # level, the sink reaching them only through the tau correction as a fixed
+    # source, so the coarse H operator lacks the rate (1 - psi) diagonal
+    # (26x the 1/dt term at dt 25, tau 1). False = the coarse levels apply
+    # the sink with the RESTRICTED flag psi (kept frozen by
+    # freeze_coarse_phi, so no switching on the coarse grid).
+    freeze_coarse_calving: bool = True
+    freeze_coarse_phi: bool = True
+    # Forward cycle only: glide's V-cycle residual trace (FASCDSolver.trace):
+    # CSV path receiving the residual split into calving / front /
+    # constrained / interior cells at start, after pre-smoothing, after the
+    # coarse correction, after post-smoothing and every `trace_every` finest
+    # sweeps. None = off (costs one residual evaluation per row).
+    trace_file: Optional[str] = None
+    trace_every: int = 25
+    # Forward cycle only: directory receiving the starting state of every
+    # solve that ends unconverged or non-finite (glide/dump.py; replay with
+    # glide.dump.load_solve_state), at most dump_max files. None = off.
+    dump_dir: Optional[str] = None
+    dump_max: int = 5
+    # Forward cycle only: backtracking coarse correction (glide
+    # FASCDConfig.backtrack): a V-cycle is accepted only if it lowers the
+    # residual, else repeated with the coarse correction scaled by the next
+    # of backtrack_scales (0 = pure smoothing).
+    backtrack: bool = False
+    backtrack_scales: tuple = (1.0, 0.5, 0.25, 0.0)
 
 
 @dataclass(frozen=True)
@@ -376,8 +404,8 @@ class ThermalConfig:
     Every forward run starts with a THERMAL SPIN-UP on the initial geometry:
     a momentum solve for the velocities, then implicit enthalpy steps of
     `spinup_dt` years with geometry and velocity frozen until the mean basal
-    temperature change over ice thicker than 100 m falls below `spinup_tol_K`
-    (at most `spinup_max_steps`), then B is set from the equilibrium and the
+    temperature change over ice thicker than 100 m, extrapolated from the decay of successive changes, falls below `spinup_tol_K`
+    (at most `spinup_max_steps`, at least `spinup_min_steps`), then B is set from the equilibrium and the
     cycle is repeated `spinup_outer` times so the velocities see the thermal
     rheology. Afterwards one enthalpy step follows every dynamics step and B
     is updated per step (restricted to every coarser level; glide's GlideStep
@@ -407,7 +435,8 @@ class ThermalConfig:
     surface_T_tbias: bool = True
     spinup_dt: float = 1000.0          # yr, thermal-only steps
     spinup_max_steps: int = 300
-    spinup_tol_K: float = 1e-3
+    spinup_tol_K: float = 1e-2         # K, estimated REMAINING change of the mean basal temperature
+    spinup_min_steps: int = 3          # per spin-up cycle
     spinup_outer: int = 2
     spinup_momentum_dt: float = 1.0    # yr, the momentum solve giving the spin-up velocities
     h_thin: float = 25.0               # m, thinner columns are clamped to the surface

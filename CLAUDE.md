@@ -957,6 +957,87 @@ near the margins at coarse levels is the blunter alternative.
    writes T_bed and T_mean (trapezoid depth average, K) into the loss VTI,
    the periodic time VTI (`io.make_*_vti_writer(thermal=)`) and
    `level_<n>/inverse_soln.nc` (end-of-run state).
+   **Calving in the FAS cycle (2026-09-27; glide multigrid.py, uncommitted on
+   cfd78a5; SolverConfig fields `freeze_coarse_calving`, `psi_restriction`,
+   `truncate_calving_correction`, `truncate_calving_velocity`, `trace_file`,
+   `trace_every`).** The user's fix for the 1 km stalls was +150 finest
+   sweeps. Tried: (1) coarse calving unfrozen on the restricted psi -- stalls
+   return even with the extra sweeps (why it was frozen); (2) the sink-
+   consistent restriction 1 - psi_c = sum((1-psi) H) / sum(H) -- unchanged;
+   (3) scaling the prolongated coarse H correction by psi -- unchanged frozen,
+   NaN unfrozen. The TRACE (`FASCDSolver.trace`: residual split into calving /
+   front / constrained / interior cells at start, pre, coarse, post and every
+   trace_every finest sweeps) located the stall on 1 km forward runs from the
+   v11 L1 checkpoint (finest 0: 13 capped solves t ~ 475-800, NaN at ~800):
+   ONE site, x 564 y -1886 km, a 5-7-cell fjord (bed -700..-1170 between
+   +1000..+1500 m walls) OUTSIDE the pin, where upstream ice (320-385 m,
+   4-5 km/yr) feeds a thin floating apron (psi 0, h0 +250, sink 1/yr) of
+   length ~u tau; level 2 sees the fjord as 1-2 cells, level 3 not at all.
+   There each coarse correction raised |r_H| ~100 -> 5e3-4e4 and the
+   calving-cell MOMENTUM residual to ~1e5, flipped psi on 3-10 k cells, and
+   post-smoothing undid it -- a limit cycle; converged solves show a ~10x
+   jump that post-smoothing removes. Hence (3b) `truncate_calving_velocity`:
+   also scale the u/v/ud/vd corrections on facets touching calving cells
+   (facet weight = min psi of its cells). Full 1 km forward 100-2020, frozen
+   coarse calving, finest 0: 114 solves / 132 V-cycles, 1 capped (the cold
+   first solve), no NaN; vs finest 150 without truncation 120 V-cycles, 0
+   capped; final states agree (volume 1e-5, |dH| median 6 mm, p99 0.4 m,
+   162 apron cells differ); wall 127 vs 148 s incl. ~20 s thermal spin-up
+   and SMB. Not yet tried in the inversion (forward-only change; the adjoint
+   cycle is untouched). Scripts: analysis/output/scratch/thermal/
+   forward_trace.py, run_inverse_trace.py (inverse.py with config overrides,
+   writes under domains/greenland/analysis_scratch/).
+   **User, same day: truncation, then `lag_calving_flag` / `lag_flotation`
+   (psi, then phi / xi held at the start-of-step state), each looked like a
+   fix once and failed under other settings -- luck, not mechanism.**
+   **SAVE-AND-REPLAY found it (2026-09-28).** glide `dump.py` +
+   `FASCDConfig.dump_dir` / `dump_max` (SolverConfig `dump_dir`): every
+   solve ending unconverged / non-finite writes its starting state + all
+   solver settings; `load_solve_state(path)` rebuilds a model and
+   `model.forward_solver.solve(dt)` repeats it exactly (checked: the omega
+   0.25 dump diverges to the same 2.83e12, omega 0.5 converges in 4).
+   Solver experiment hooks: `FASCDSolver.correction_hook(l, level)` (edit
+   the prolongated z_*) and `.h_prolongation`. Scripts in
+   analysis/output/scratch/thermal/: replay.py (options, `corr=velocity|
+   thickness|none`, `corr_scale`, `n_levels=1`), zH_anatomy.py,
+   replay_backtrack.py, replay_matrix.sh. From the v11 L1 checkpoint with
+   the config of 2026-09-28 (finest 0): omega 0.25 and post_steps 50 NaN at
+   the FIRST step, unfrozen coarse calving stalls from step 16 and NaNs at
+   39; the baseline runs clean. Dissection of those solves: the COARSE-GRID
+   THICKNESS CORRECTION does the damage -- smoothing alone, velocity-only
+   correction, correction x 0.5 or bilinear H prolongation all converge
+   where the full correction diverges; on the first step (frozen coarse
+   calving) it puts +2500-2800 m into 2x2 blocks of ICE-FREE OCEAN in front
+   of the outlets (no coarse sink: diagonal 1/dt vs the fine 1/dt + rate,
+   26x), with unfrozen calving +100-250 m into the thin fast apron of the
+   fjord at x 564, y -1886 (a boundary layer of length u tau the 2-4 km
+   levels cannot represent). No single fixed remedy works on every dump,
+   so the fix is GLOBALIZATION: `FASCDConfig.backtrack` (SolverConfig
+   `backtrack`, `backtrack_scales` (1, 0.5, 0.25, 0)): accept a V-cycle
+   only if it lowers the finest residual norm, else restore the state and
+   redo it with every prolongated coarse correction scaled by the next
+   factor (0 = pure smoothing, kept). Replays: every dump converges with
+   frozen coarse calving. Full 1 km forward 100-2020, finest 0, backtrack:
+   baseline 118 V-cycles / 0 capped / 114 s (1 backtracked cycle); omega
+   0.25 141 / 0 / 150 s; post_steps 50 180 / 2 / 106 s; unfrozen 124 / 0 /
+   125 s (all three were NaN); omega 0.25 + post 50 finite but 31 capped
+   (too little smoothing). Previous fix finest 150: 148 s. Final states
+   agree to 1e-5 in volume (median |dH| 2-4 cm) once the spin-up criterion
+   below is fixed. Forward cycle only; the adjoint cycle is unchanged.
+   **Thermal spin-up stopping test was wrong**: 'per-1-kyr change of mean
+   T_bed < 1e-3 K' stopped the second cycle after ONE step (4.6e-4 K) in
+   some runs and after 24 in others (depending on the momentum solve
+   before it), 269.73 vs 269.57 K, 53 vs 48 % temperate bed, +5 m interior
+   thickness by 2020 -- a solver-setting-dependent thermal state. Now
+   `spinup_tol_K` (0.01 K) bounds the ESTIMATED REMAINING change,
+   dT r / (1 - r) with r the ratio of successive changes, with
+   `spinup_min_steps` 3; every run lands at 269.58 K (~5 s more).
+   The experiments with no robust effect (psi_restriction,
+   truncate_calving_correction / _velocity, lag_calving_flag, lag_flotation)
+   were STRIPPED before the commit; kept: freeze_coarse_calving / _phi
+   exposure, trace, dump / replay, backtrack. User, same day: with backtrack
+   and post_steps 50 the 1 km inversion ran 20 fine-level iterations before
+   a NaN (dump_max had been reached by then).
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is

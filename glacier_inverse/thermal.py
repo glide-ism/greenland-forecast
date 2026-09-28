@@ -113,14 +113,21 @@ class ThermalDriver:
                 self.tm.update_rheology = False
                 _, Tb_prev = self._T_bed_mean(thick)
                 n = 0
-                dT = float("inf")
+                dT = dT_prev = float("inf")
                 for n in range(1, int(cfg.spinup_max_steps) + 1):
                     self.tm.pre_momentum()
                     self.tm.step(dt_sec)
                     _, Tb = self._T_bed_mean(thick)
                     dT = abs(Tb - Tb_prev)
                     Tb_prev = Tb
-                    if dT < cfg.spinup_tol_K:
+                    # remaining drift of the mean basal temperature, extrapolating
+                    # the geometric decay of successive changes (r = dT / dT_prev);
+                    # a small single change is NOT convergence when r ~ 1 (a
+                    # per-step test stopped after 1 step 0.16 K short, 2026-09-28)
+                    r = dT / dT_prev if dT_prev > 0 else 0.0
+                    remaining = dT * r / (1.0 - r) if r < 1.0 else float("inf")
+                    dT_prev = dT
+                    if n >= int(cfg.spinup_min_steps) and (remaining < cfg.spinup_tol_K or dT == 0.0):
                         break
                 self.tm.update_rheology = True
                 self.tm.push_rheology()
