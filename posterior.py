@@ -67,7 +67,7 @@ for d in Path(f"{INPUT_PATH}/rto_lr_decay/").iterdir():
                 priors.mu_logit_cloud
                 + GGaPPMap.apply(priors.cloud_model, data["logit_cloud"])
                 ).cpu().detach())
-        log_betas.append(priors.log_beta_from_whitened(data["log_beta"]).cpu().detach())
+        log_betas.append(priors.log_beta_from_whitened(data["log_beta"], data.get("log_beta_mean")).cpu().detach())
         log_mfs.append(data["log_mf"].cpu().detach() * priors.sigma_log_mf + priors.mu_log_mf)
         log_rfs.append(data["log_rf"].cpu().detach() * priors.sigma_log_rf + priors.mu_log_rf)
     except FileNotFoundError:

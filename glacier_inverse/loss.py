@@ -31,6 +31,7 @@ class PriorMeans:
     z_bed:        Optional[torch.Tensor] = None
     z_bed_mean:   Optional[torch.Tensor] = None
     z_log_beta:   Optional[torch.Tensor] = None
+    z_log_beta_mean: Optional[torch.Tensor] = None
     z_pbias:      Optional[torch.Tensor] = None
     # Temperature bias field: zero mean until the RTO migration wires it into
     # sample_like (its draw must be appended AFTER the existing draw order so
@@ -97,6 +98,7 @@ class LossTerms:
     J_prior_h_atm:    torch.Tensor = None
     J_prior_cloud:    torch.Tensor = None
     J_prior_smb:      torch.Tensor = None
+    J_prior_beta_mean: torch.Tensor = None
 
     def _term(self, name: str):
         if name in self.data_terms:
@@ -125,7 +127,8 @@ class LossTerms:
     def J_prior(self):
         return (self.J_prior_bed + self.J_prior_bed_mean + self.J_prior_beta
                 + self.J_prior_pbias + self.J_prior_tbias
-                + self.J_prior_h_atm + self.J_prior_cloud + self.J_prior_smb)
+                + self.J_prior_h_atm + self.J_prior_cloud + self.J_prior_smb
+                + (self.J_prior_beta_mean if self.J_prior_beta_mean is not None else 0.0))
 
     @property
     def J(self):
@@ -140,9 +143,12 @@ class LossTerms:
         print(", ".join(
             f"{_LOG_LABELS.get(name, name)} Loss: {float(term):.2f}"
             for name, term in self.data_terms.items()))
+        beta_mean = (f"Beta Mean Prior: {float(self.J_prior_beta_mean):.2f}, "
+                     if self.J_prior_beta_mean is not None and float(self.J_prior_beta_mean) != 0.0 else "")
         print(f"Bed Prior: {float(self.J_prior_bed):.2f}, "
               f"Bed Mean Prior: {float(self.J_prior_bed_mean):.2f}, "
               f"Beta Prior: {float(self.J_prior_beta):.2f}, "
+              f"{beta_mean}"
               f"Pbias Prior: {float(self.J_prior_pbias):.2f}, "
               f"Tbias Prior: {float(self.J_prior_tbias):.2f}, "
               f"H_atm Prior: {float(self.J_prior_h_atm):.2f}, "
@@ -157,7 +163,8 @@ _SMB_BLOCK = ("z_log_H_atm", "z_logit_cloud")
 # resolution of the influence caps. Scalars (z_log_mf, ...) have d = 1.
 _PRIOR_OF = {
     "z_bed": "bed_prior", "z_bed_mean": "mean_prior",
-    "z_log_beta": "log_beta_prior", "z_pbias": "pbias_prior",
+    "z_log_beta": "log_beta_prior", "z_log_beta_mean": "log_beta_mean_prior",
+    "z_pbias": "pbias_prior",
     "z_tbias": "tbias_prior", "z_log_H_atm": "h_atm_prior",
     "z_logit_cloud": "cloud_prior",
 }
@@ -397,6 +404,7 @@ def compute_prior(
     log_mf: torch.Tensor,
     prior_means: PriorMeans,
     physical_bed_uncond: Optional[torch.Tensor] = None,
+    physical_log_beta: Optional[torch.Tensor] = None,
 ) -> tuple:
     """Whitened-space Gaussian prior terms: exact negative log-densities
     `loss_scale · ½‖z − mean‖²`, on the same footing as the data terms
@@ -420,7 +428,19 @@ def compute_prior(
     z_bed_recomputed = GGaPPWhiten.apply(priors.bed_model, base_bed - physical_bed_mean)
     J_prior_bed = scale * 0.5 * ((z_bed_recomputed - prior_means.value("z_bed", z_bed_recomputed)) ** 2).sum()
     J_prior_bed_mean = scale * 0.5 * ((params.z_bed_mean - prior_means.value("z_bed_mean", params.z_bed_mean)) ** 2).sum()
-    J_prior_beta = scale * 0.5 * ((params.z_log_beta - prior_means.value("z_log_beta", params.z_log_beta)) ** 2).sum()
+    if (getattr(priors, "log_beta_mean_model", None) is not None and not priors.log_beta_mean_additive
+            and physical_log_beta is not None):
+        # Centered two-field log beta (the bed_mean pattern): the fluctuation
+        # about the long-wavelength mean, re-whitened from the physical field.
+        m = priors.log_beta_mean_from_whitened(params.z_log_beta_mean)
+        z_lb = GGaPPWhiten.apply(priors.log_beta_model, physical_log_beta - priors.mu_log_beta - m)
+    else:
+        z_lb = params.z_log_beta
+    J_prior_beta = scale * 0.5 * ((z_lb - prior_means.value("z_log_beta", z_lb)) ** 2).sum()
+    # Long-wavelength log-beta field: exactly zero while it sits at 0 (off).
+    zbm = getattr(params, "z_log_beta_mean", None)
+    J_prior_beta_mean = (scale * 0.5 * ((zbm - prior_means.value("z_log_beta_mean", zbm)) ** 2).sum()
+                         if zbm is not None else torch.zeros((), device=params.z_log_beta.device))
     J_prior_pbias = scale * 0.5 * ((params.z_pbias - prior_means.value("z_pbias", params.z_pbias)) ** 2).sum()
     # Temperature bias: whitened-space term, so it needs no Matern model and
     # is computed unconditionally — exactly zero while the term is disabled
@@ -440,4 +460,5 @@ def compute_prior(
                    + (params.z_z0 - prior_means.value("z_z0", params.z_z0)) ** 2).sum()
 
     return (J_prior_bed, J_prior_bed_mean, J_prior_beta, J_prior_pbias,
-            J_prior_tbias, J_prior_h_atm, J_prior_cloud, J_prior_smb)
+            J_prior_tbias, J_prior_h_atm, J_prior_cloud, J_prior_smb,
+            J_prior_beta_mean)

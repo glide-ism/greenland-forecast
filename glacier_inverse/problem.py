@@ -72,10 +72,15 @@ class WhitenedParameters:
     z = 0 = prior median and never enters the forward graph)."""
 
     def __init__(self, z_bed, z_bed_mean, z_log_beta, z_pbias, z_tbias,
-                 z_log_mf, z_log_rf, z_tau, z_z0, z_log_H_atm, z_logit_cloud):
+                 z_log_mf, z_log_rf, z_tau, z_z0, z_log_H_atm, z_logit_cloud,
+                 z_log_beta_mean=None):
         self.z_bed = z_bed
         self.z_bed_mean = z_bed_mean
         self.z_log_beta = z_log_beta
+        # long-wavelength log-beta field (config.log_beta_mean_prior); always
+        # allocated, inert at 0 when the prior is off
+        self.z_log_beta_mean = (torch.zeros_like(z_log_beta) if z_log_beta_mean is None
+                                else z_log_beta_mean)
         self.z_pbias = z_pbias
         self.z_tbias = z_tbias
         self.z_log_mf = z_log_mf
@@ -86,7 +91,7 @@ class WhitenedParameters:
         self.z_logit_cloud = z_logit_cloud
 
     def requires_grad_(self) -> "WhitenedParameters":
-        for t in (self.z_bed, self.z_bed_mean, self.z_log_beta,
+        for t in (self.z_bed, self.z_bed_mean, self.z_log_beta, self.z_log_beta_mean,
                   self.z_pbias, self.z_tbias, self.z_log_mf, self.z_log_rf,
                   self.z_tau, self.z_z0, self.z_log_H_atm, self.z_logit_cloud):
             t.requires_grad_()
@@ -105,6 +110,7 @@ class WhitenedParameters:
             z_z0=self.z_z0.detach().clone(),
             z_log_H_atm=self.z_log_H_atm.detach().clone(),
             z_logit_cloud=self.z_logit_cloud.detach().clone(),
+            z_log_beta_mean=self.z_log_beta_mean.detach().clone(),
         )
 
     @torch.no_grad()
@@ -114,6 +120,7 @@ class WhitenedParameters:
         self.z_bed.copy_(other.z_bed)
         self.z_bed_mean.copy_(other.z_bed_mean)
         self.z_log_beta.copy_(other.z_log_beta)
+        self.z_log_beta_mean.copy_(other.z_log_beta_mean)
         self.z_pbias.copy_(other.z_pbias)
         self.z_tbias.copy_(other.z_tbias)
         self.z_log_mf.copy_(other.z_log_mf)
@@ -431,6 +438,10 @@ class GlacierProblem:
         mg.sliding.m.set(cfg.sliding_m)
         mg.sliding.u_reg.set(cfg.u_reg)
         mg.sliding.water_drag.set(cfg.water_drag)
+        mg.sliding.u0.set(float(cfg.sliding_u0))
+        if cfg.sliding_N_scale_H:
+            mg.sliding.N_scale_H.set(float(cfg.sliding_N_scale_H))
+            mg.sliding.N_floor_H.set(float(cfg.sliding_N_floor_H))
 
         mg.calving.timescale.set(cfg.calving_timescale)
         mg.calving.q.set(cfg.calving_q)
@@ -889,7 +900,7 @@ class GlacierProblem:
         bed, bed_mean, bed_uncond = priors.bed_from_whitened(
             params.z_bed, params.z_bed_mean,
             data_override=self._bed_data_override)
-        log_beta = priors.log_beta_from_whitened(params.z_log_beta)
+        log_beta = priors.log_beta_from_whitened(params.z_log_beta, params.z_log_beta_mean)
         pbias = GGaPPMap.apply(priors.pbias_model, params.z_pbias)
         # Additive temperature bias (K): mapped only when the term is enabled
         # (no Matern hierarchy exists otherwise); None keeps t2m untouched.
@@ -1223,6 +1234,7 @@ class GlacierProblem:
             log_mf=physical.log_mf,
             prior_means=prior_means,
             physical_bed_uncond=getattr(physical, "bed_uncond", None),
+            physical_log_beta=physical.log_beta,
         )
         return LossTerms(
             data_terms=data_terms,
@@ -1234,6 +1246,7 @@ class GlacierProblem:
             J_prior_h_atm=J_prior_terms[5],
             J_prior_cloud=J_prior_terms[6],
             J_prior_smb=J_prior_terms[7],
+            J_prior_beta_mean=J_prior_terms[8],
         )
 
 

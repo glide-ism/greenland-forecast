@@ -69,7 +69,7 @@ def collect_rto_samples(rto_dir: Path):
         beds.append(priors.bed_from_whitened(
             data["bed"], data["bed_mean"])[0].cpu().detach())
         pbiases.append(GGaPPMap.apply(priors.pbias_model, data["precipitation_bias"]).cpu().detach())
-        log_betas.append(priors.log_beta_from_whitened(data["log_beta"]).cpu().detach())
+        log_betas.append(priors.log_beta_from_whitened(data["log_beta"], data.get("log_beta_mean")).cpu().detach())
         log_mfs.append((data["log_mf"] * priors.sigma_log_mf + priors.mu_log_mf).cpu().detach())
         log_rfs.append((data["log_rf"] * priors.sigma_log_rf + priors.mu_log_rf).cpu().detach())
 

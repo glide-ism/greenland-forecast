@@ -1122,6 +1122,162 @@ near the margins at coarse levels is the blunter alternative.
    what handles it. A correct fix must be tested on warm-started solves and
    through inverse.py, not only cold first steps.
 
+19. `config.sliding_u0`, `sliding_N_scale_H`, `sliding_N_floor_H` (2026-09-28;
+   0 / None = the Alaska behaviour): REGULARIZED COULOMB drag with a
+   DIMENSIONAL, FLOORED effective pressure. In glide (uncommitted), with
+   xi_f = clip(1 - d / (r H), 0, 1) the flotation fraction (d = -bed),
+     tau_b = beta X^p |u|^m (u0 / (|u| + u0))^m,
+     X = xi_f                                  sliding.N_scale_H = 0 (normalized: N / rho_i g H)
+     X = xi_f (H + N_floor_H) / N_scale_H      N_scale_H > 0: N* / (rho_i g N_scale_H),
+   N* = xi_f rho_i g (H + H0) -- N itself on thick grounded ice, 0 at
+   flotation, bounded below by rho_i g H0 on thin grounded ice (the reason the
+   law was normalized in the first place: a bare N = rho_i g H drags thin
+   margins to zero). Land sensitivity nu = dlnN*/dlnH = H / (H + H0): ~1 on
+   thick ice (what the Coulomb result needs), -> 0 on thin margins. N_scale_H
+   is a pure unit scale, degenerate with beta (C = beta / (rho_i g H_s)^p).
+   No spatial reference field and no reference year. `sliding.u0` (m/yr) is
+   the Coulomb transition: Weertman below, capped at beta X^p u0^m above;
+   one device helper (`stress.cu drag_speed_factor`) serves every drag
+   evaluation (residual, Vanka, JVP, gradients), and `model.py` frictional
+   heating matches. Tests: defaults bit for bit (jvp 0.3 %, grad 0.85 %,
+   adjoint < 1e-6); u0 100, H_s 1000, H0 100: jvp 0.3 %, grad 0.12 %, adjoint
+   2e-7; greenland_coarse forward + loss + backward finite. forward_soln.nc
+   records `sliding_u0`, `sliding_N_scale_H`, `sliding_N_floor_H`.
+   WARM START: beta's meaning changes, so convert the checkpoint with
+   `tools/convert_beta_warmstart.py` (log beta += p ln(H_s / (H + H0)) -
+   ln R(|u_b|) at a forward replay's 2018 state, ice cells only, re-whitened
+   exactly under the log-beta prior); from v14 with u0 300 / H_s 1000 / H0 100
+   the median change is -0.54 in log beta and 41 k thin, slow margin cells
+   land slightly above beta_max 20 (median 22-25). An intermediate version
+   (2026-09-28, same day) used a per-cell reference thickness
+   (`sliding_N_ref`, `geometry.H_ref`) and a subglacial `water_head` field;
+   both were removed.
+   WHY (replays from year 100 on v14's beta, `inverse_v14/slide_test/`,
+   `analysis/output/basin_mb_{lia,coulomb}/`, scratch `slide_test/`): v14
+   loses half the observed ice 1993-2019 (-81 vs ITS_LIVE -153 Gt/yr) and NW
+   is near balance in 1986-95 (Mankoff -38): the model's thinning stops within
+   ~400-800 m of elevation while the altimetry's reaches 2000 m. Speed-up with
+   thinning needs eta nu > 1 (eta = dlnF/dlnN, nu = dlnN/dlnH); glide's
+   normalized N has nu = 0 on land, so thinning SLOWS land-based ice. The
+   GRISHM LIA front pin (`front_mask_lia.nc`) + regularized Coulomb (u0 300)
+   + dimensional N gives NW 1986-95 / 2006-20 -38 / -66 (Mankoff -38 / -70),
+   1993-2019 -44 (ITS_LIVE -38.5), the inland profile to 2000 m, SE / NO
+   right; overshoots CW (-56 vs -26, gates 142 vs 79) and the total (2018
+   gates 586 vs 495; GrIS 1993-2019 -193). Coulomb alone on the normalized
+   xi, or the LIA pin alone, gives about half; a smoothed-overburden water
+   head adds nothing on top of Coulomb. Claude predicted Coulomb would NOT
+   reach land-based ice (amplification only): wrong for the dimensional N,
+   where the thickness term is neutral (eta nu ~ 1) and the plastic bed
+   raises the slope diffusivity. Replays at full resolution take 15-17 min
+   (the plastic bed caps many 25-yr spin-up solves at |r_H| < 150; the
+   observation period converges). Not yet inverted: fast-ice beta rises by
+   ((|u| + u0) / u0)^m, so `beta_max` may bind at outlets.
+
+20. `config.*_prior` may be a `SpectralPriorHyperparams` (2026-09-29; a
+   `PriorHyperparams` = the Alaska behaviour, ggapp's multigrid MaternPrior):
+   `glacier_inverse.priors.SpectralFieldPrior`, the field prior as an explicit
+   variance spectrum on the domain's orthonormal DCT-II basis (mirror
+   boundaries, which diagonalize ggapp's 5-point Neumann Laplacian exactly):
+   forward C^{1/2}, whiten C^{-1/2}, both self-adjoint and exact, O(N log N),
+   duck-compatible with GGaPPMap / GGaPPWhiten, `sample()` exact. The
+   spectrum is a SUM of `PriorComponent(sigma, l, nu, mass)` terms
+   (tau/dx)^2 (mass kappa^2 + lambda)^-(nu+1), tau and kappa from the Matern
+   (sigma, l, nu): the SPDE with the MASS term decoupled from the derivative
+   terms. mass = 1 is the Matern (a single component reproduces ggapp's
+   MaternPrior: forward 3e-5, whiten 4e-7 relative); mass = 0 its intrinsic
+   counterpart (derivative penalty only; needs `sigma_mean`, the prior std of
+   the domain-mean mode). WHY (user, Coulomb single-step tests): interior log
+   beta would not move whatever beta_init or m. The adjoint was right (level
+   3, interior -0.554 vs FD -0.571), but a +0.1 coherent shift of log beta
+   over the slow interior (1 M cells) cost 776 in 0.5|z|^2 under the Matern
+   1 / 2 km prior (l was 8 km before commit 3500420: 50) against a
+   velocity-misfit change of 0.6 (sigma_floor 10 m/yr): the mass term
+   kappa^4 x^2 penalizes amplitude in proportion to AREA, so a short-range
+   prior with a fixed mean pins the regional mean of log beta to mu_log_beta
+   (the Weertman law only looked fine because mu = ln 2.5 was about right for
+   it). The user fixed the run with a longer l and a lower sigma_floor; the
+   spectral prior is the structural fix. Production grid, cost of the same
+   interior shift / sample std: Matern 2 km 776 / 1.05; + Matern 1 / 200 km
+   13 / 1.5; + Matern 1 / 500 km 24 / 1.5; old 8 km 50 / 1.0; + INTRINSIC
+   1 / 200 km 13 / 29 -- the alpha = 2 intrinsic spectrum ~ lambda^-2 puts
+   enormous variance in the domain-scale modes (pure intrinsic 2 km: std 361
+   on a 512 km test domain), so use a PROPER long component, not mass = 0,
+   for log beta. 2 km structure costs the same in all of them. A
+   checkpoint's z is only meaningful under its own prior:
+   `tools/convert_beta_warmstart.py --old-prior 1,2000,1` re-whitens exactly
+   (physical log beta preserved to 3e-6). Tests: tests/test_spectral_prior.py;
+   smoke_test checks a spectral prior's spec. The bed conditioner (ggapp
+   ConditionedPrior) needs a ggapp bed prior: keep bed_prior a
+   PriorHyperparams while bed_conditioning is enabled (untested otherwise).
+   TWO-FIELD VARIANT (same day; the user found the single summed spectrum
+   impractical under SGD: the long component's huge low-mode variance sets
+   the stable step for the whole whitened vector, so the 2 km structure
+   crawls): `config.log_beta_mean_prior` (None = off) + `lr_z_log_beta_mean`,
+   log beta = mu + Map(z_log_beta) + Map_mean(z_log_beta_mean), the second
+   field with its own prior term `J_prior_beta_mean`, optimizer group
+   (inverse.py), checkpoint key `log_beta_mean` (absent -> zeros) and
+   influence-cap mapping; posterior.py / sensitivity.py pass it through;
+   rto_sample.py does NOT perturb it yet. Checks (level 3, Greenland): J
+   identical with the field at 0; adjoint vs FD through the mean field -130 /
+   -122 (the step's nonlinearity, as for the short field); checkpoint round
+   trip exact. Step scale per unit lr, first SGD step, physical log beta rms:
+   short 1.6, mean (Matern 1 / 200 km) 154 -> lr_z_log_beta_mean ~ 1/100 of
+   lr_z_log_beta (default 0.01). CENTERED MODE (same day, user's suggestion
+   from the bed field; `config.log_beta_mean_mode`, default "centered",
+   "additive" = the form above): log beta = mu + Map(z_log_beta) ALONE and
+   J_prior_beta = 0.5 |Whiten(log beta - mu - m)|^2 with m = Map_mean(z_mean)
+   (re-whitened from physical.log_beta in loss.compute_prior, exactly as the
+   bed's prior term), J_prior_beta_mean = 0.5 |z_mean|^2. A linear change of
+   variables of the additive form (same objective, same MAP), but the data
+   gradient reaches only z_log_beta, at the short prior's step scale, and m
+   is driven by the prior coupling alone. `log_beta_from_whitened` adds m
+   only in additive mode; `log_beta_mean_from_whitened` gives m. Warm starts
+   carry over unchanged (z_log_beta whitens the full field, z_mean = 0).
+   NOT YET TESTED on the GPU (the conditioning comparison was interrupted by
+   a machine freeze); the live config runs it. Equivalent alternative, not implemented:
+   one spectral field with a per-mode gradient preconditioner
+   m_k = sum_i a_i S_i,k / sum_i S_i,k (reproduces the two-field SGD path).
+
+21. **Force-balance traction start, `tools/beta_force_balance.py`
+   (2026-09-29; a tool, no library change).** The velocity misfit's
+   sensitivity to log beta is d u_s / d ln beta = -(1/m) u_b, i.e.
+   proportional to the BASAL speed. From the uniform prior start (beta_init 4,
+   m = 1/3, dimensional N with X ~ 2-3 on thick ice) the interior slides at
+   ~0.01 m/yr, so its gradient is ~1e4 too small whatever its misfit: the
+   user's single-step Coulomb inversions freed the ice as a WAVE from the
+   outlets that died where the membrane coupling ran out (scratch
+   `probe_beta_gradient.py`, level 1, data-only gradient w.r.t. physical log
+   beta: at the prior start NEGIS 125 km upstream ran 0.5 m/yr against 359 at
+   |g| 8e-6, the outlets 1e-2; the converged run kept beta ~3.3 beyond 400 km
+   upstream, a sharp step where the fit ended; g / u_b roughly constant).
+   The tool sets, per cell, tau_d / (rho g) = H |grad S| (S smoothed 4 km),
+   u_def = shallow-ice deformation for A_glen / n, u_b = max(u_obs - u_def,
+   0.2 u_obs, 1 m/yr), and beta0 from glide's own drag at u_b (m, Coulomb u0,
+   dimensional N and floor), log-smoothed 2 km, prior mean off the valid
+   ice, clipped to beta_max; whitened under the configured prior(s) (centered:
+   the mean field seeded with log beta0 smoothed at l/2; additive: the split
+   the other way), every other parameter copied from `--base`. From it
+   (level 1): J_data 827 (prior start 3314, converged run 654) and live
+   gradients everywhere -- NEGIS upstream |g| 1-7e-3 instead of 1e-6-1e-4,
+   the model there at 0.6-0.8 of observed (the local balance ignores the
+   margins' share of the stress, so fast ice starts too sticky: outlets
+   -5..-8 sigma, which the optimizer fixes fast because their gradient is
+   large). The user's alternative, a sign-based optimizer (it fixed a similar
+   stall in Antarctica), removes the magnitude disparity instead of the
+   plateau; the two combine.
+   SIMPLIFIED THE SAME DAY (user): PLUG FLOW (u_b = max(u_obs, --min-ub), no
+   deformation term, no A dependence) on the observed thickness / bed, and a
+   PARTIAL checkpoint holding only `log_beta` (+ `log_beta_mean`) and the bed
+   parametrization tag, so the start depends on the inputs and the config
+   alone (`--base` removed). `io.load_whitened_params_into` now tolerates
+   partial checkpoints: every absent key (bed, bed_mean, pbias, rf / mf, and
+   as before tbias / tau / z0 / H_atm / cloud) keeps the problem's own
+   initialization -- NOT z = 0 for the bed, which would be a flat bed at the
+   prior mean. Checked: loaded into a fresh GlacierProblem every non-traction
+   field is bit-identical to the problem's initialization. Default output
+   `domains/greenland/beta_init_force_balance.p`; beta0 medians 1.4-1.8 on
+   slow ice, 4.0 at 300-1000 m/yr, 7.5 above (u0 300, H_s 1000, H0 100).
+
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
 now differentiated — the drag Jacobians carry d(beta xi^p)/dH and /dbed via

@@ -29,9 +29,9 @@ OUTPUT_PATH = config.output_dir
 # friction" update leaks onto the outlets through the beta prior (fast ice
 # 0.35 -> 0.22 of observed in one step); from v5 the descent is monotone.
 #WARM_START_PATH = None
-WARM_START_PATH = f"{DOMAIN}/inverse_v11/level_1/torch_vars.p"  # None = from the prior
+#WARM_START_PATH = f"{DOMAIN}/inverse_v14/level_0/torch_vars.p"  # None = from the prior
 #WARM_START_PATH = f"{DOMAIN}/inverse_v9/level_2/torch_vars.p"  # None = from the prior
-#WARM_START_PATH = f"{DOMAIN}/inverse/level_1/torch_vars.p"
+WARM_START_PATH = f"{DOMAIN}/beta_init_force_balance.p"
 
 problem = GlacierProblem(config)
 params = problem.params
@@ -60,6 +60,9 @@ sgd_groups += [{"params": params.z_bed,      "lr": lr0["lr_z_bed"],      "name":
     {"params": params.z_bed_mean, "lr": lr0["lr_z_bed_mean"], "name": "lr_z_bed_mean"},
     {"params": params.z_log_beta, "lr": lr0["lr_z_log_beta"], "name": "lr_z_log_beta"},
 ]
+if config.log_beta_mean_prior is not None:     # long-wavelength log-beta field, its own step
+    sgd_groups += [{"params": params.z_log_beta_mean, "lr": lr0["lr_z_log_beta_mean"],
+                    "name": "lr_z_log_beta_mean"}]
 
 sgd_groups += [{"params": params.z_pbias,  "lr": lr0["lr_z_pbias"], "name": "lr_z_pbias"},]
 
@@ -141,10 +144,16 @@ def write_loss_vti(diag, vti_writer, sim, physical, level, i):
         dhdt_coarse = dhdt_obs.model_rate(sim, "coarse")
     else:
         dhdt_coarse = (sim.H - sim.H_prev) / sim.final.dt_step
+    # the long-wavelength log-beta field m (log_beta_mean_prior; zeros when off):
+    # in centered mode it enters the prior residual only, so compare it with log(beta)
+    log_beta_mean_coarse = (differentiable_restriction(
+        problem.priors.log_beta_mean_from_whitened(params.z_log_beta_mean), level)
+        if problem.priors.log_beta_mean_model is not None else None)
     update_diagnostic_fields(diag, sim.S_coarse, S_obs_coarse, bed_mean_coarse,
                              pbias_coarse, pbias_total_coarse, dhdt_coarse,
                              tbias_=tbias_coarse,
-                             H_atm_=H_atm_coarse, f_clear_=f_clear_coarse)
+                             H_atm_=H_atm_coarse, f_clear_=f_clear_coarse,
+                             log_beta_mean_=log_beta_mean_coarse)
     vti_writer.append(problem.mg[level], time=i)
     vti_writer.write_pvd()
 
@@ -221,7 +230,7 @@ for level in range(config.max_level, config.min_level - 1, -1):
         # memory. Costs milliseconds per iteration against a full solve.
         cp.get_default_memory_pool().free_all_blocks()
         torch.cuda.empty_cache()
-        #save_whitened_params(params, f"{OUTPUT_PATH}/level_{level}/torch_vars.p", bed_parametrization=problem.priors.bed_parametrization)
+        save_whitened_params(params, f"{OUTPUT_PATH}/level_{level}/torch_vars.p", bed_parametrization=problem.priors.bed_parametrization)
 
     # Final evaluation (no backward) so the multigrid state matches the
     # converged parameters before we save it out. Its residual fields (raw

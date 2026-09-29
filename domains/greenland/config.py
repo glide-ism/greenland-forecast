@@ -28,6 +28,7 @@ import numpy as np
 from glacier_inverse.config import (
     BedConditioningConfig, GlacierConfig, MaternNoise, OceanForcingConfig,
     PriorHyperparams, Schedule, SolverConfig, ThermalConfig,
+    PriorComponent, SpectralPriorHyperparams,
 )
 from glacier_inverse.observations import (
     BedSpec, DhdtSpec, ExtentSpec, SnowlineSpec, SurfaceSpec, VelocitySpec,
@@ -68,7 +69,7 @@ CONFIG = GlacierConfig(
     base_dir=str(_HERE),
     vti_base_name="greenland",
     gridded_filename=_GRIDDED_FILE,
-    results_subdir=f"inverse_v14",
+    results_subdir=f"inverse_v1.1",
     smb_model="enthalpy",
     anomaly_integration="mean_anomaly",
     #anomaly_filename = "temperature_anomaly_flat.nc",
@@ -151,8 +152,8 @@ CONFIG = GlacierConfig(
     climatology_only=False,
 
     n_levels=6,
-    max_level=0,
-    max_iters=(100, 100, 200, 200),
+    max_level=3,
+    max_iters=(20, 50, 100, 200),
 
     init_from_observed_geometry=True,
     init_H_floor=1.0,          # = thklim
@@ -160,14 +161,26 @@ CONFIG = GlacierConfig(
 
     # ---- ice physics (from glide's Greenland example)
     rho_water=1000.0,
-    A_glen=1e-16,
+    A_glen=2e-17,
     #A_glen=5e-17,
     eps_reg=1e-6,
     n_glen=3,
     H_reg=25.0,
     sliding_m=1.0 / 3.0,
-    beta_init=2.5,
-    mu_log_beta=float(np.log(2.5)),
+    # Regularized Coulomb + dimensional N (2026-09-28): with the LIA front pin
+    # (front_mask_lia.nc) replays on v14's beta reproduce NW's pre-1990
+    # imbalance and its inland thinning (u0 300: NW 1986-95 -38 vs Mankoff
+    # -38, 1993-2019 -44 vs ITS_LIVE -38.5) but overshoot CW and the total
+    # discharge (2018 gates 586 vs 495). The two go together: Coulomb on
+    # glide's normalized xi leaves land-based ice thickness-insensitive.
+    # With Coulomb, fast-ice beta is larger by ((|u| + u0) / u0)^m (x1.4 at
+    # 1 km/yr with u0 300, x3.7 at 5 km/yr with u0 100), so beta_max may
+    # bind at outlets.
+    sliding_u0=300.0,             # m/yr; tested 300 and 100. 0 = Weertman
+    sliding_N_scale_H=1000.0,     # e.g. 1000.0 (m): dimensional N* = xi_f rho_i g (H + N_floor_H). None = N / (rho_i g H)
+    sliding_N_floor_H=100.0,    # m; thin-ice floor of N* (used when sliding_N_scale_H is set)
+    beta_init=4.0,
+    mu_log_beta=float(np.log(4.0)),
     # effectively no-slip above this; also forward_standalone.py's BETA_MAX.
     # Without it beta runs away where xi -> 0 (95 at Humboldt) and the
     # adjoint's effective-pressure term goes stiff (2026-09-17)
@@ -221,13 +234,17 @@ CONFIG = GlacierConfig(
         # invert traction over the observed geometry; the TF settings above are
         # then ignored. None = the TF-driven margins.
         #pin_front='rgi_mask'),
-        pin_front=None, pin_front_filename='front_mask.nc'),
+        # 'front_mask_lia.nc' (preprocessing/make_front_mask_lia.py): the same
+        # TermPicks masks from 1972, preceded by the GRISHM Little Ice Age
+        # maximum extent through 1900 and a uniform retreat to the 1972 fronts.
+        #pin_front=None, pin_front_filename='front_mask_lia.nc'),
+        pin_front=None, pin_front_filename='front_mask_lia.nc'),
     # ---- thermomechanical coupling (library change 18): B from glide's
     # enthalpy model instead of A_glen (A_glen then only seeds the spin-up's
     # first momentum solve). Thermal spin-up at the start of every run.
-    thermal=ThermalConfig(nz=9, Q_geo=0.042, weighting="mean"),
+    #thermal=ThermalConfig(nz=9, Q_geo=0.042, weighting="mean"),
     # ---- FAS / Vanka settings from the same example, both solvers
-    forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=50,
+    forward_solver=SolverConfig(coarsest_steps=200, pre_steps=10, post_steps=150,
                                 finest_steps=0, relative_tolerance=1e-2,
                                 absolute_tolerance=10.0, report_norms=True,
                                 omega=0.5, momentum_damping=1.0, step_tolerance=1e-6,backtrack=True,dump_dir='./dump',dump_max=10),
@@ -241,9 +258,30 @@ CONFIG = GlacierConfig(
     q_lw0=-35.0,
 
     # ---- priors (l in metres; 1 km cells)
-    bed_prior=PriorHyperparams(sigma=500.0, l=4000.0, nu=1),
+    bed_prior=PriorHyperparams(sigma=300.0, l=4000.0, nu=1),
     mean_prior=PriorHyperparams(sigma=1000.0, l=30000.0, nu=1),
     log_beta_prior=PriorHyperparams(sigma=1.0, l=2000.0, nu=1),
+    # Two-scale spectral prior (2026-09-29, library change 20): the 2 km
+    # Matern pins the REGIONAL mean of log beta (a +0.1 shift over the slow
+    # interior costs 776 in 0.5|z|^2, a long 200 km component brings it to 13
+    # at unchanged cost for 2 km structure). Convert warm starts with
+    # tools/convert_beta_warmstart.py --old-prior 1,2000,1.
+    #log_beta_prior=SpectralPriorHyperparams(
+    #    (PriorComponent(sigma=1.0, l=2000.0), PriorComponent(sigma=0.1, l=200e3))),
+    # ... or as TWO fields with separate steps (2026-09-29): the regional level
+    # in its own long-wavelength field m = Map_mean(z_log_beta_mean), with
+    # log_beta_prior back to the 2 km Matern. One summed spectrum made the
+    # long modes cap the SGD step for the short ones (user).
+    # log_beta_mean_mode="centered" (the bed_mean pattern, the user's
+    # better-conditioned form): log beta = mu + Map(z_log_beta) ALONE, the
+    # prior is 0.5 |Whiten(log beta - mu - m)|^2 + 0.5 |z_mean|^2, so the data
+    # act on z_log_beta only and m follows its smooth part through the prior.
+    # "additive": log beta = mu + Map(z) + m, where the data gradient reaches
+    # z_mean amplified by the long prior (first-step rms 154 vs 1.6 per unit
+    # lr at sigma 1 / 200 km). Same model and MAP either way; only the
+    # optimizer's geometry differs. lr_z_log_beta_mean is tuned per mode.
+    log_beta_mean_prior=PriorHyperparams(sigma=1.0, l=50000, nu=1),
+    log_beta_mean_mode="centered",
     pbias_prior=PriorHyperparams(sigma=0.3, l=50000.0, nu=1),
     tbias_prior=PriorHyperparams(sigma=1.0, l=50000.0, nu=1),
     h_atm_prior=PriorHyperparams(sigma=0.2, l=150000.0, nu=1),
@@ -274,7 +312,7 @@ CONFIG = GlacierConfig(
         # mosaic's zero-error pixels; 5 % of speed is its structural error at
         # the outlets. Was: MaternNoise(sigma=100.0, l=10000.0, nugget=100.0).
         VelocitySpec(noise=MaternNoise(sigma=1.0, l=10000.0, nugget=1.0), weight=1.0,
-                     per_pixel_error=True, sigma_floor=10.0, sigma_rel=0.05, sigma_rel_km=5.0,
+                     per_pixel_error=True, sigma_floor=5.0, sigma_rel=0.05, sigma_rel_km=5.0,
                      surge_biased=False, mask_unobserved=True, nu=3),
         #VelocitySpec(noise=MaternNoise(sigma=50.0, l=10000.0, nugget=50.0), weight=1.0,
         #             surge_biased=False, mask_unobserved=True, nu=1),
@@ -348,7 +386,8 @@ CONFIG = GlacierConfig(
         pcg_rtol_adjoint=1e-2),
 
     lr_z_bed=0.025,
-    lr_z_log_beta=1.0,
+    lr_z_log_beta=0.1,
+    lr_z_log_beta_mean=0.1,
     lr_z_pbias=1.0,             # see influence_cap
     lr_z_tbias=1.0,
     lr_z_log_H_atm=1.0,

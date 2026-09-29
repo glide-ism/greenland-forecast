@@ -25,6 +25,7 @@ class DiagnosticFields:
     H_atm: Field           # atmospheric transfer coefficient (W m-2 K-1); zeros under ETIM
     f_clear: Field         # clear-sky fraction sigmoid(logit_cloud); zeros under ETIM
     dhdt: Field
+    log_beta_mean: Field = None   # long-wavelength log-beta field m (config.log_beta_mean_prior); zeros when off
 
 
 def make_diagnostic_fields(mg_level) -> DiagnosticFields:
@@ -39,7 +40,7 @@ def make_diagnostic_fields(mg_level) -> DiagnosticFields:
     return DiagnosticFields(delta=_empty(), srf=_empty(), bed_mean=_empty(),
                             p_bias=_empty(), p_bias_total=_empty(),
                             t_bias=_empty(), H_atm=_empty(), f_clear=_empty(),
-                            dhdt=_empty())
+                            dhdt=_empty(), log_beta_mean=_empty())
 
 
 def _thermal_vti_fields(thermal) -> dict:
@@ -73,6 +74,7 @@ def make_loss_vti_writer(mg_level, output_dir: str, base: str, diag: DiagnosticF
             "f_clear": diag.f_clear,
             "bed_mean": diag.bed_mean,
             "dhdt": diag.dhdt,
+            "log_beta_mean": diag.log_beta_mean,
             "smb": mg_level.forcing.smb,
             **_thermal_vti_fields(thermal),
         },
@@ -132,7 +134,7 @@ def write_static_vti(mg_level, output_dir: str, base: str,
 
 def update_diagnostic_fields(diag: DiagnosticFields, S_, S_obs_, bed_mean_, pbias_,
                              pbias_total_, dhdt_, tbias_=None,
-                             H_atm_=None, f_clear_=None) -> None:
+                             H_atm_=None, f_clear_=None, log_beta_mean_=None) -> None:
     """Copy detached tensors into the cupy-backed diagnostic Fields.
 
     `pbias_` is the spatial (Matern) log-precip bias; `pbias_total_` is the joint
@@ -166,6 +168,11 @@ def update_diagnostic_fields(diag: DiagnosticFields, S_, S_obs_, bed_mean_, pbia
     else:
         diag.f_clear.data[:, :] = cp.asarray(f_clear_.detach())
     diag.dhdt.data[:, :] = cp.asarray(dhdt_.detach())
+    if diag.log_beta_mean is not None:
+        if log_beta_mean_ is None:
+            diag.log_beta_mean.data[:, :] = 0.0
+        else:
+            diag.log_beta_mean.data[:, :] = cp.asarray(log_beta_mean_.detach())
 
 
 def save_whitened_params(params, path: str, *, extras: dict = None,
@@ -182,6 +189,7 @@ def save_whitened_params(params, path: str, *, extras: dict = None,
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "log_beta": params.z_log_beta,
+        "log_beta_mean": params.z_log_beta_mean,
         "bed": params.z_bed,
         "bed_mean": params.z_bed_mean,
         "precipitation_bias": params.z_pbias,
@@ -286,12 +294,23 @@ def load_whitened_params_into(params, path: str, *, priors=None) -> None:
     Pass `priors` (GlacierPriors) to enable exact conversion of z_bed when the
     checkpoint's bed parametrization differs from the current one; without it,
     a mismatched load raises rather than silently misinterpreting z_bed.
+
+    PARTIAL checkpoints (2026-09-29, e.g. tools/beta_force_balance.py, which
+    writes only the traction fields): every parameter whose key is absent
+    keeps the problem's own initialization (bed from the observed geometry,
+    bed_mean from its smoothed copy, SMB fields at the prior median).
     """
     d = torch.load(path)
     saved = d.get("bed_parametrization", "legacy")
     current = priors.bed_parametrization if priors is not None else "legacy"
     params.z_log_beta = d["log_beta"].requires_grad_()
-    if saved == current:
+    # the long-wavelength log-beta field (absent from checkpoints before
+    # 2026-09-29: it keeps its freshly initialized zeros)
+    if "log_beta_mean" in d:
+        params.z_log_beta_mean = d["log_beta_mean"].requires_grad_()
+    if "bed" not in d:
+        pass                                   # partial checkpoint: keep the initial bed
+    elif saved == current:
         params.z_bed = d["bed"].requires_grad_()
     elif priors is None:
         raise ValueError(
@@ -301,10 +320,10 @@ def load_whitened_params_into(params, path: str, *, priors=None) -> None:
     else:
         params.z_bed = _convert_z_bed(
             d["bed"], saved, current, priors).requires_grad_()
-    params.z_bed_mean = d["bed_mean"].requires_grad_()
-    params.z_pbias = d["precipitation_bias"].requires_grad_()
-    params.z_log_rf = d["log_rf"].requires_grad_()
-    params.z_log_mf = d["log_mf"].requires_grad_()
+    for key, attr in (("bed_mean", "z_bed_mean"), ("precipitation_bias", "z_pbias"),
+                      ("log_rf", "z_log_rf"), ("log_mf", "z_log_mf")):
+        if key in d:
+            setattr(params, attr, d[key].requires_grad_())
     # The temperature-bias field, precip-depletion and enthalpy-model scalars
     # are newer than the original checkpoint format; keep the freshly-
     # initialized values (prior median) when warm-starting from a MAP that

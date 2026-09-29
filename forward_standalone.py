@@ -337,6 +337,10 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
     mg.sliding.m.set(config.sliding_m)
     mg.sliding.u_reg.set(config.u_reg)
     mg.sliding.water_drag.set(config.water_drag)
+    mg.sliding.u0.set(float(getattr(config, "sliding_u0", 0.0)))
+    if getattr(config, "sliding_N_scale_H", None):  # dimensional N (see GlacierConfig.sliding_N_scale_H)
+        mg.sliding.N_scale_H.set(float(config.sliding_N_scale_H))
+        mg.sliding.N_floor_H.set(float(config.sliding_N_floor_H))
 
     ### Calving: height-above-buoyancy sink, ice with H < (1 + q) H_f decays
     ### at H / timescale per year (cp.inf disables it)
@@ -634,6 +638,9 @@ def run(ctx: Run) -> None:
                      ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
                                     else f"constant margins q = {Q0:g}, h0 = {H00:g} m"),
                      A_glen=float(config.A_glen),
+                     sliding_u0=float(lvl.sliding.u0.value),
+                     sliding_N_scale_H=float(lvl.sliding.N_scale_H.value),
+                     sliding_N_floor_H=float(lvl.sliding.N_floor_H.value),
                      thermal=(repr(ctx.thermal.cfg) if ctx.thermal is not None else "none (isothermal A_glen)"),
                      thermal_spinup=(repr(ctx.thermal.spinup_info) if ctx.thermal is not None else ""))
     out.to_netcdf(out_dir / "forward_soln.nc")

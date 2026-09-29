@@ -96,6 +96,9 @@ def main() -> int:
     priors = problem.priors
 
     def _prior_matches(model, expected, label):
+        if hasattr(model, "hp"):                  # SpectralFieldPrior: carries its spec
+            check(f"{label} spectral prior {expected}", model.hp == expected, f"got {model.hp}")
+            return
         try:
             got_sigma = float(model.mg.parameters.sigma.value)
             got_l = float(model.mg.parameters.l.value)

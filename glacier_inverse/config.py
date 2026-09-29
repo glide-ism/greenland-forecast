@@ -24,7 +24,7 @@ SCHEDULABLE_WEIGHTS = ("loss_scale",)
 #   lr_z_log_mf=Schedule(final=0.01, ramp=lambda i: 0.0 if i < 100 else 0.01)
 # holds the melt factor for the first 100 iterations of every level.
 SCHEDULABLE_LRS = (
-    "lr_z_bed", "lr_z_bed_mean", "lr_z_log_beta",
+    "lr_z_bed", "lr_z_bed_mean", "lr_z_log_beta", "lr_z_log_beta_mean",
     "lr_z_pbias", "lr_z_tbias", "lr_z_log_mf", "lr_z_log_rf",
     "lr_z_log_H_atm", "lr_z_logit_cloud",
     "lr_z_tau", "lr_z_z0",
@@ -104,6 +104,55 @@ class PriorHyperparams:
     sigma: float
     l: float
     nu: int
+
+
+@dataclass(frozen=True)
+class PriorComponent:
+    """One term of a `SpectralPriorHyperparams` spectrum: the SPDE
+    (mass kappa^2 - Laplacian)^((nu+1)/2) x = tau W with kappa = sqrt(8 nu)/l
+    and tau set so that mass = 1 is the Matern field of marginal std `sigma`,
+    range `l`, smoothness `nu` (any real nu > 0). `mass` scales the mass term
+    only, leaving the derivative terms and so the small-scale spectrum as they
+    are: mass = 1 the Matern, mass = 0 its INTRINSIC counterpart (penalizes
+    derivatives only; a coherent offset over a region costs its edges, not its
+    area -- the prior then needs `SpectralPriorHyperparams.sigma_mean`), in
+    between an effective range l / sqrt(mass) with the same small-scale
+    amplitude."""
+    sigma: float
+    l: float
+    nu: float = 1.0
+    mass: float = 1.0
+
+
+@dataclass(frozen=True)
+class SpectralPriorHyperparams:
+    """Matern-like field prior as an explicit spectrum on the domain's DCT
+    basis (mirror boundaries, like ggapp's stencil): the variance of each
+    cosine mode is the SUM of the components' spectra, so e.g. a short-range
+    proper Matern plus a long-range or intrinsic component frees regional
+    levels and trends while keeping local roughness regularized. `sigma_mean`
+    (optional; required when any component has mass = 0) is the prior std of
+    the DOMAIN MEAN, replacing the constant mode's variance -- a vague prior
+    on the level instead of the hard pin a fixed mean with a short-range
+    Matern implies (a coherent shift Delta over an area A costs ~ Delta^2 A /
+    (pi l^2 sigma^2) there). Exact whitening, forward map and sampling
+    (glacier_inverse.priors.SpectralFieldPrior); a single mass-1 component
+    reproduces ggapp's MaternPrior. `sigma`, `l`, `nu` return the first
+    component's, for code that reads a single scale (influence caps)."""
+    components: tuple
+    sigma_mean: Optional[float] = None
+
+    @property
+    def sigma(self):
+        return self.components[0].sigma
+
+    @property
+    def l(self):
+        return self.components[0].l
+
+    @property
+    def nu(self):
+        return self.components[0].nu
 
 
 @dataclass(frozen=True)
@@ -676,6 +725,27 @@ class GlacierConfig:
     bed_prior:      PriorHyperparams = PriorHyperparams(sigma=500.0,    l=2000.0,  nu=1)
     mean_prior:     PriorHyperparams = PriorHyperparams(sigma=1000.0,   l=10000.0, nu=1)
     log_beta_prior: PriorHyperparams = PriorHyperparams(sigma=1./3.,      l=1000.0,  nu=1)
+    # Two-field log beta (2026-09-29): log beta = mu_log_beta + Map(z_log_beta)
+    # + Map_mean(z_log_beta_mean), the second a long-wavelength field with its
+    # own prior, prior term (J_prior_beta_mean) and learning rate
+    # (lr_z_log_beta_mean). A short-range log_beta_prior with a fixed mean pins
+    # the REGIONAL level of log beta (its mass term costs a coherent shift in
+    # proportion to area); this field carries regional levels instead. None =
+    # off (z_log_beta_mean stays 0 and out of the forward graph).
+    log_beta_mean_prior: Optional[PriorHyperparams] = None
+    # How the two fields combine (only with log_beta_mean_prior):
+    #   "centered"  (default; the bed_mean pattern) log beta = mu + Map(z_log_beta)
+    #               ALONE, prior 0.5 |Whiten(log beta - mu - m)|^2 + 0.5 |z_mean|^2
+    #               with m = Map_mean(z_log_beta_mean): the data act on
+    #               z_log_beta only (short-prior step scale), the mean follows
+    #               the smooth part of log beta through the prior coupling.
+    #   "additive"  log beta = mu + Map(z_log_beta) + Map_mean(z_log_beta_mean),
+    #               prior 0.5 |z|^2 + 0.5 |z_mean|^2: the data gradient reaches
+    #               z_log_beta_mean amplified by the long prior's low-mode
+    #               variance, which caps the SGD step (poorly conditioned).
+    # Both are the same Gaussian model (a linear change of variables): same
+    # objective, same MAP; only the optimizer's geometry differs.
+    log_beta_mean_mode: str = "centered"
     pbias_prior:    PriorHyperparams = PriorHyperparams(sigma=0.1,     l=10000.0, nu=1)
     tbias_prior:    PriorHyperparams = PriorHyperparams(sigma=0.1,     l=10000.0, nu=1)
     # Priors for the enthalpy SMB parameters, which are (ny, nx) GP FIELDS
@@ -905,6 +975,23 @@ class GlacierConfig:
     sliding_m:   float = 1.0 / 3.0
     u_reg:       float = 1.0
     water_drag:  float = 0.01
+    # Regularized Coulomb (2026-09-28, glide `sliding.u0`): the drag is
+    # beta xi^p |u|^m (u0 / (|u| + u0))^m, i.e. Weertman well below u0 (m/yr)
+    # and capped at beta xi^p u0^m above it. 0 = Weertman (the Alaska
+    # behaviour).
+    sliding_u0:  float = 0.0
+    # Dimensional effective pressure with a thickness floor (2026-09-28, glide
+    # `sliding.N_scale_H` / `N_floor_H`): the drag's effective-pressure factor
+    # is N* / (rho_i g N_scale_H) with N* = xi_f rho_i g (H + N_floor_H), xi_f
+    # the flotation fraction -- N itself on thick grounded ice, 0 at
+    # flotation, bounded below by rho_i g N_floor_H on thin grounded ice.
+    # Thinning then lowers the drag of land-based ice too (the normalized
+    # N / (rho_i g H) is thickness-insensitive on land). N_scale_H is a pure
+    # unit scale, degenerate with beta: choose it near the typical thickness
+    # so beta_init / the log-beta prior mean / beta_max keep their magnitude.
+    # None = the normalized law (the Alaska behaviour).
+    sliding_N_scale_H: Optional[float] = None
+    sliding_N_floor_H: float = 100.0
 
     # Calving / geometry (glide's signed-flotation model, 2026-09). Every
     # grounded/floating quantity derives from the flotation excess
@@ -1049,6 +1136,11 @@ class GlacierConfig:
     lr_z_bed:      LearningRate = 0.0125
     lr_z_bed_mean: LearningRate = 0.5
     lr_z_log_beta: LearningRate = 4.05
+    # The long-wavelength log-beta field (log_beta_mean_prior): its whitened
+    # gradient is amplified by the long prior's large low-mode variance, so it
+    # needs a much smaller step than lr_z_log_beta -- the reason it is a
+    # separate field.
+    lr_z_log_beta_mean: LearningRate = 0.01
 
     lr_z_pbias:    LearningRate = 0.001
     lr_z_tbias:    LearningRate = 0.001
