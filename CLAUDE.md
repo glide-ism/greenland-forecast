@@ -1278,6 +1278,82 @@ near the margins at coarse levels is the blunter alternative.
    `domains/greenland/beta_init_force_balance.p`; beta0 medians 1.4-1.8 on
    slow ice, 4.0 at 300-1000 m/yr, 7.5 above (u0 300, H_s 1000, H0 100).
 
+22. **Pre-1950 ocean forcing and the released pin (2026-09-29;
+   `OceanForcingConfig` defaults = the dTF = 0 hold, bit-identical).** EN4
+   starts in 1950, so the free calving law's spin-up (and any LIA extension
+   of the fronts) sees whatever the pre-record ocean is assumed to be. Three
+   options, all in `ocean.py`, combinable:
+   (a) HOLD `pre_record_scale` / `pre_record_offset` / `pre_record_ramp`:
+   TF_pre = max(scale TF_clim + offset, 0), ramped linearly to 0 over the
+   `ramp` years before the record;
+   (b) INDEX `pre_record_index` (file, e.g. `temperature_anomaly.nc`),
+   `pre_record_index_k` (K of TF per K of index), `_smooth` (11 yr centred
+   mean), `_start` (first year, None = the whole index): dTF_pre += k (I_s -
+   I_ref), I_ref the smoothed index's `ref_years` mean, so it is referenced
+   like EN4's dTF; k fitted from EN4 front TF on the 11-yr index over
+   1950-2025: 0.19 all fronts, 0.28 NW, 0.31 SE (r 0.85-0.94, ~7 dof);
+   (c) RELEASED PIN `pin_release_year` (`ocean.ReleasedPin`, wired in
+   problem.py and forward_standalone): the config's pin for steps ending at
+   or before that year, the free TF-driven margins after -- the pinned
+   extent as an INITIAL CONDITION. A step straddling the record start
+   averages / maxes the pre-record years in.
+   Why not GCM TF: CESM2 / MRI front TF has no interannual skill against
+   EN4 (r 0-0.2, free-running), and 1850-99 minus 1950-79 is -0.32 / -0.04 K
+   at NW fronts, -0.6 / -0.3 SE -- the same size as the index route.
+   Tool: `sweep_pre_tf.py run` (level, grid of scale x offset, `--index-k`,
+   `--index-start`, `--release-year`, `--keep-pin` for a pinned reference,
+   `--t-end`, `--vti --vti-from`; pins OFF unless kept / released) and
+   `score` (vs GRISHM `lia_mask`: cover of the LIA retreat zone with H > 50 m,
+   keep of 2015 marine ice, over_km2 beyond the LIA extent, per region).
+   `analysis/basin_mass_balance.py` now reads coarse-level runs (frames
+   repeated onto the 1 km grid: area integrals exact, gates sample the coarse
+   cell). RESULTS (user's v1.1 isothermal checkpoint, level 1, all with the
+   config's `calving_h0_base_tau1.nc` per-basin margin, alpha_h 80, tau 1;
+   `inverse_v1.1/sweep_*`, `analysis/output/basin_mb_{pre_tf,release,index,
+   index1850}_l1/`; dM/dt Gt/yr, Mankoff NW 1986-95 -38, 2006-20 -70, GrIS
+   -74 / -239, 1986-2020 -148):
+   * HOLDS: the held extent is reached within ~1600 yr (1700 = 1850 = 1900
+     states); cooling raises LIA cover but overshoot beyond the LIA extent
+     faster -- GrIS area error (uncovered + overshoot) 8.4 k km2 at (1, 0),
+     12.4 k at (1, -0.5), 18 k at (1, -1); in NW too (2.6 / 3.0 / 3.7 k);
+     scale hits the warm SE / CE fjords (overshoot 5-14 k km2 against LIA
+     zones of 0.3-0.5 k), NO needs the offset, NE sits at cover 0.52 in
+     every run. Mechanism: a negative margin makes floating ice admissible,
+     so a cooled fjord fills until the margin flips or the fjord ends -- a
+     hold picks WHICH fjords fill, not WHERE a front stops. To 2020: offsets
+     -0.5 / -1 shed the overshoot inside the record (GrIS 2006-20 -398 /
+     -429, CW -113 / -155, 1993-2019 -266 / -281 vs -153); offset 0 (the
+     plain free law) -24 / -298, 1986-2020 -144, 1993-2019 -170, NW -2 / -88,
+     but 51 k Gt less ice than the pinned run at 1985 and SE / CE gates 52 /
+     27 against 81 / 55 pinned.
+   * RELEASED PIN (1850 or 1900, identical): the LIA extent is still
+     unwinding in the record (GrIS 2006-20 -354 / -357, 1986-2020 -194 /
+     -204; CE, CW, SE too negative); NW 1986-95 -11 / -13, i.e. NW's early
+     imbalance is NOT a legacy of the LIA extent -- the pinned run gets -18
+     only from the imposed 1900-1972 retreat. Initial condition, not physics:
+     dropped.
+   * INDEX, whole record (GISP2 era included): a RATCHET. The index is warm
+     vs 1950-79 through most of the Common Era (+0.3..+0.6 K, 11-yr maxima
+     +2..+4 K), each warm excursion strips fronts, the LIA cold rebuilds only
+     part (the free law has no restoring force): ice at 1985 vs pinned -72 /
+     -85 / -155 k Gt at k 0.25 / 0.5 / 1.0, NW gates 1990 53 / 51 / 46 vs 73.
+     Right totals (1993-2019 -152..-165) for the wrong reason (less ice left
+     to lose). Do not use the deep index as ocean forcing.
+   * INDEX FROM 1850 (`pre_record_index_start=1850`): no ratchet; the
+     1920s-40s warm phase is visible (1900-50 volume change -1.9 k Gt at
+     k 0 -> -6.3 k at k 1.0) but mostly decays by the 1980s: NW 1986-95 -5 /
+     -6 / -11 (k 0.25 / 0.5 / 1.0 = 4x the fit), 2006-20 -87 / -84 / -72;
+     GrIS 1986-2020 -148 / -150 / -148; SE, CE, NE, SW unchanged. So
+     twentieth-century ocean forcing does not explain NW's 1986-95 imbalance
+     under this law; part of the pinned run's shortfall is level (-18 at L1
+     vs -23 at L0 for the same pin; v14-beta Coulomb/LIA L0 replays gave
+     -38). Usable as the physically motivated pre-record forcing at the
+     fitted k; within the error bars like the plain free law.
+   * EVERY free variant leaves SE / CE gates at ~52 / 27 against 81 / 55
+     pinned: a steady-state front-position property of the per-basin margin
+     field (fitted 2026-09-25 against v9's beta), not of the pre-record
+     forcing. Re-running the per-basin c sweep on v1.1's beta is the lever.
+
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
 now differentiated — the drag Jacobians carry d(beta xi^p)/dH and /dbed via

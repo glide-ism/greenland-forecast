@@ -223,7 +223,17 @@ def model_series(run_dir, masks, dx, prefer='auto', gates=None):
     else:
         gen = frames_snapshots(run_dir)
     rows = []
+    shape = next(iter(masks.values())).shape
     for t, H, smb, vel in gen:
+        if H.shape != shape:
+            # a coarse-level run (frames on the run level): repeat onto the
+            # level-0 grid, which conserves the area integrals exactly; the
+            # gate sampling then reads the coarse cell's value
+            f, (ny0, nx0) = shape[0] // H.shape[0], H.shape
+            up = lambda a: None if a is None else np.kron(a, np.ones((f, f), a.dtype))[:shape[0] + (a.shape[0] - ny0) * f,
+                                                                                    :shape[1] + (a.shape[1] - nx0) * f]
+            H, smb = up(H), up(smb)
+            vel = None if vel is None else tuple(up(v) for v in vel)
         row = {'time': t}
         ice = H > H_MIN
         for r, m in masks.items():

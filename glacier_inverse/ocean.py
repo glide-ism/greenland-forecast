@@ -39,8 +39,10 @@ fjords closer to instability, cold fjords negative margins = persisting
 tongues); the alphas set the response to warming. clim = 0 recovers the
 pure anomaly model, clim = alpha the pure absolute one (which over-levers:
 fronts on either side of the zero crossing end up insensitively cold or
-contracted). Steps before the record see dTF = 0; after the record the
-last year holds. Both terms are zero (margins at their baselines) where
+contracted). Steps before the record see the HELD pre-record anomaly
+dTF_pre = max(pre_record_scale TF_clim + pre_record_offset, 0) - TF_clim,
+ramped to 0 over `pre_record_ramp` years before the record (0 with the
+defaults); after the record the last year holds. Both terms are zero (margins at their baselines) where
 the product is undefined or farther than `max_dist_km` from its native
 cells.
 
@@ -209,11 +211,41 @@ class PinnedFront:
         return self._q, self._cache[1], self._zero
 
 
+class ReleasedPin:
+    """A front pin until `t_release`, the free TF-driven margins after
+    (config `pin_release_year`): steps ending at or before t_release take
+    pin.margins, later ones free.margins. Same surface as OceanForcing."""
+
+    def __init__(self, pin: "PinnedFront", free: "OceanForcing", t_release: float):
+        self.pin, self.free, self.t_release = pin, free, float(t_release)
+        self.cfg, self.ok, self.clim, self.years = free.cfg, free.ok, free.clim, free.years
+        self.freeze_anomaly = free.freeze_anomaly
+        self._file = getattr(free, "_file", None)
+
+    @property
+    def ny_nx(self):
+        return self.free.ny_nx
+
+    def _src(self, t1: float):
+        return self.pin if t1 <= self.t_release + 1e-6 else self.free
+
+    def describe(self) -> str:
+        return (f"RELEASED PIN: steps ending <= {self.t_release:g} -> {self.pin.describe()} || "
+                f"after -> {self.free.describe()}")
+
+    def anomaly(self, t0: float, t1: float) -> np.ndarray:
+        return self._src(t1).anomaly(t0, t1)
+
+    def margins(self, t0: float, t1: float):
+        return self._src(t1).margins(t0, t1)
+
+
 class OceanForcing:
     def __init__(self, cfg: OceanForcingConfig, *, years: np.ndarray, stat, dist: np.ndarray,
                  q0: float, h00: float, source: str = "", freeze_anomaly: bool = False,
                  rho: Optional[np.ndarray] = None, rho_source: str = "",
-                 h0_fixed: Optional[np.ndarray] = None, h0_base: Optional[np.ndarray] = None):
+                 h0_fixed: Optional[np.ndarray] = None, h0_base: Optional[np.ndarray] = None,
+                 index: Optional[tuple] = None):
         if cfg.statistic not in ("max", "mean"):
             raise ValueError(f"OceanForcingConfig.statistic must be 'max' or 'mean', got {cfg.statistic!r}")
         self.cfg = cfg
@@ -250,11 +282,30 @@ class OceanForcing:
         self.ok = finite & (dist <= cfg.max_dist_km)
         self.clim = np.where(self.ok, clim, 0.0).astype(np.float32)
         self._zero = np.zeros(self.stat.shape[1:], np.float32)
+        # the held pre-record anomaly (K); None when it is the identity hold
+        held = np.maximum(cfg.pre_record_scale * self.clim + cfg.pre_record_offset, 0.0) - self.clim
+        held = np.where(self.ok, held, 0.0).astype(np.float32)
+        self.pre_held = held if np.any(held != 0.0) else None
+        # the pre-record index term: {year: k (I_s - I_ref)} (K), None when off
+        self.pre_index, self.index_source = None, ""
+        if index is not None and cfg.pre_record_index:
+            iy, iv, self.index_source = index
+            iy, iv = np.asarray(iy, dtype=int), np.asarray(iv, dtype=float)
+            n = max(int(cfg.pre_record_index_smooth), 1)
+            num = np.convolve(np.nan_to_num(iv), np.ones(n), "same")
+            den = np.convolve(np.isfinite(iv).astype(float), np.ones(n), "same")
+            ism = num / np.maximum(den, 1e-9)                  # centred mean, window shrinks at the ends
+            sel = (iy >= y0) & (iy <= y1)
+            if not sel.any():
+                raise ValueError(f"pre_record_index: no index years inside ref_years {cfg.ref_years}")
+            iref = ism[sel].mean()
+            self.pre_index = {int(y): float(cfg.pre_record_index_k * (v - iref)) for y, v in zip(iy, ism)}
+            self._index_first = int(iy.min())
 
     @classmethod
     def from_file(cls, path, crop_factor: int, cfg: OceanForcingConfig, *,
                   q0: float, h00: float, lazy: bool = False,
-                  freeze_anomaly: bool = False, rho_path=None) -> "OceanForcing":
+                  freeze_anomaly: bool = False, rho_path=None, index_path=None) -> "OceanForcing":
         """Load only the needed annual statistic from thermal_forcing.nc,
         cropped like GLIDE_inputs. Dense (the file is closed before
         returning) or, with `lazy`, read year by year from the file kept
@@ -288,9 +339,17 @@ class OceanForcing:
         finally:
             if not lazy:
                 f.close()
+        index = None
+        if cfg.pre_record_index:
+            ip = Path(index_path) if index_path is not None else path.parent / cfg.pre_record_index
+            if not ip.exists():
+                raise FileNotFoundError(f"ocean_forcing.pre_record_index={cfg.pre_record_index!r}: {ip} not found "
+                                        f"(preprocessing/make_temperature_anomaly.py)")
+            with xr.open_dataset(ip) as f_i:
+                index = (f_i.time.values, f_i.temp_anomaly.values, f"{ip.name} ({f_i.attrs.get('source', '')})")
         of = cls(cfg, years=years, stat=stat, dist=dist, q0=q0, h00=h00, source=source,
                  freeze_anomaly=freeze_anomaly, rho=rho, rho_source=rho_source, h0_fixed=h0_fixed,
-                 h0_base=h0_base)
+                 h0_base=h0_base, index=index)
         of._file = f if lazy else None
         return of
 
@@ -315,8 +374,37 @@ class OceanForcing:
                       if self.h0_fixed is not None else "") + ")"
                    if self.rho is not None else "dTF")
                 + f" in {c.h0_bounds}"
+                + (f"; before {self.years[0]}: TF held at max({c.pre_record_scale:g} TF_clim + {c.pre_record_offset:g} K, 0)"
+                   f" (dTF {float(self.pre_held[self.ok].min()):+.2f}..{float(self.pre_held[self.ok].max()):+.2f} K"
+                   + (f", ramped to 0 over the {c.pre_record_ramp:g} yr before" if c.pre_record_ramp > 0 else "") + ")"
+                   if self.pre_held is not None else "")
+                + (f"; before {self.years[0]}: + {c.pre_record_index_k:g} K/K x ({c.pre_record_index_smooth}-yr mean of "
+                   f"{self.index_source} - its {c.ref_years} mean)"
+                   + (f" from {c.pre_record_index_start:g}" if c.pre_record_index_start is not None else "") + ", "
+                   f"1850-99 {np.mean([self.pre_index.get(y, 0.0) for y in range(1850, 1900)]):+.2f} K, "
+                   f"1920-49 {np.mean([self.pre_index.get(y, 0.0) for y in range(1920, 1950)]):+.2f} K"
+                   if self.pre_index is not None else "")
                 + ("; CLIMATOLOGY MODE: dTF held at 0, the margins are time-invariant"
                    if self.freeze_anomaly else ""))
+
+    def _pre_field(self, y: int) -> np.ndarray:
+        """TF for a calendar year before the record: the climatology + the
+        (ramped) hold + the index term (the index's first value held before it)."""
+        d = 0.0
+        if self.pre_held is not None:
+            d = self._pre_weight(y) * self.pre_held
+        start = self.cfg.pre_record_index_start
+        if self.pre_index is not None and (start is None or y >= start):
+            d = d + self.pre_index.get(int(y), self.pre_index.get(self._index_first, 0.0))
+        return np.maximum(self.clim + d, 0.0) if np.ndim(d) or d else self.clim
+
+    def _pre_weight(self, y: int) -> float:
+        """Weight of the held anomaly for calendar year y < the record start:
+        1 before the ramp, linear to 0 at the record start (year centres)."""
+        ramp = float(self.cfg.pre_record_ramp)
+        if ramp <= 0:
+            return 1.0
+        return float(min(max((int(self.years[0]) - (y + 0.5)) / ramp, 0.0), 1.0))
 
     def anomaly(self, t0: float, t1: float) -> np.ndarray:
         """dTF(x) = TF_step - TF_clim for the step (t0, t1] on the fine grid;
@@ -325,15 +413,26 @@ class OceanForcing:
             return self._zero
         years, stat = self.years, self.stat
         ya, yb = int(years[0]), int(years[-1])
-        overlap = [(min(y, yb), w) for y, w in year_overlap_weights(t0, t1) if y >= ya]
-        if not overlap:
-            return self._zero
-        idx = [int(np.searchsorted(years, y)) for y, _ in overlap]
+        weights = year_overlap_weights(t0, t1)
+        if self.pre_held is None and self.pre_index is None:
+            overlap = [(min(y, yb), w) for y, w in weights if y >= ya]
+            if not overlap:
+                return self._zero
+            idx = [int(np.searchsorted(years, y)) for y, _ in overlap]
+            if self.cfg.statistic == "max":
+                agg = stat[idx].max(axis=0)
+            else:
+                wsum = sum(w for _, w in overlap)
+                agg = sum(w * stat[i] for (_, w), i in zip(overlap, idx)) / wsum
+            return np.where(self.ok, agg - self.clim, 0.0).astype(np.float32)
+        # with a held pre-record anomaly every overlapped year counts: record
+        # years by their TF, earlier ones by TF_clim + w(y) * held
+        fields = [self._pre_field(y) if y < ya
+                  else stat[int(np.searchsorted(years, min(y, yb)))] for y, _ in weights]
         if self.cfg.statistic == "max":
-            agg = stat[idx].max(axis=0)
+            agg = np.maximum.reduce(fields)
         else:
-            wsum = sum(w for _, w in overlap)
-            agg = sum(w * stat[i] for (_, w), i in zip(overlap, idx)) / wsum
+            agg = sum(w * f for (_, w), f in zip(weights, fields))
         return np.where(self.ok, agg - self.clim, 0.0).astype(np.float32)
 
     def margins(self, t0: float, t1: float):

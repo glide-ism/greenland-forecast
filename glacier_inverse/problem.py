@@ -251,6 +251,15 @@ class GlacierProblem:
             else:
                 self.ocean_forcing = PinnedFront.from_gridded(
                     self.gridded_data, cfg.ocean_forcing, q0=cfg.calving_q, h00=cfg.calving_h0)
+            rel = getattr(cfg.ocean_forcing, "pin_release_year", None)
+            tf_path = inputs_dir / cfg.ocean_forcing.filename
+            if rel is not None:
+                # pinned until the release year, the free TF-driven law after
+                from .ocean import OceanForcing, ReleasedPin
+                free = OceanForcing.from_file(tf_path, 2 ** cfg.n_levels, cfg.ocean_forcing,
+                                              q0=cfg.calving_q, h00=cfg.calving_h0,
+                                              freeze_anomaly=cfg.climatology_only)
+                self.ocean_forcing = ReleasedPin(self.ocean_forcing, free, rel)
             print(self.ocean_forcing.describe())
         elif cfg.ocean_forcing.enabled:
             tf_path = inputs_dir / cfg.ocean_forcing.filename

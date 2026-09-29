@@ -37,6 +37,7 @@ depth = -bed, sigmoid_c 1/m, height-above-buoyancy calving
 FAS/Vanka settings of config.forward_solver.
 """
 import argparse
+import dataclasses
 import math
 from pathlib import Path
 from typing import Optional
@@ -183,6 +184,22 @@ def year_overlap_weights(t0: float, t1: float, eps: float = 1e-9) -> list:
 
 
 def load_ocean_forcing() -> Optional[OceanForcing]:
+    global OCEAN
+    rel = getattr(OCEAN, "pin_release_year", None)
+    if OCEAN.enabled and rel is not None and (OCEAN.pin_front or getattr(OCEAN, "pin_front_filename", None)):
+        # a pin until the release year, the free TF-driven law after (ocean.ReleasedPin)
+        from glacier_inverse.ocean import ReleasedPin
+        full = OCEAN
+        try:
+            OCEAN = dataclasses.replace(full, pin_release_year=None)
+            pin = load_ocean_forcing()
+            OCEAN = dataclasses.replace(full, pin_release_year=None, pin_front=None, pin_front_filename=None)
+            free = load_ocean_forcing()
+        finally:
+            OCEAN = full
+        of = ReleasedPin(pin, free, rel)
+        print(f"  -> released at {rel:g}")
+        return of
     if not OCEAN.enabled:
         print(f"ocean forcing disabled: constant margins q = {Q0:g}, h0 = {H00:g} m")
         return None

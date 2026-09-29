@@ -452,6 +452,49 @@ class OceanForcingConfig:
     # rho assuming the static margin is -alpha_h rho alone). NaN / missing
     # cells contribute 0; None = no field. The pin ignores it.
     rho_filename: Optional[str] = None
+    # PRE-RECORD HELD TF (2026-09-29): before the record's first year the
+    # thermal forcing is held at an AFFINE transform of the climatology,
+    #     TF_pre(x) = max(pre_record_scale * TF_clim(x) + pre_record_offset, 0)
+    # i.e. dTF_pre = (scale - 1) TF_clim + offset (K), ramped linearly to 0
+    # over the `pre_record_ramp` years before the record starts (0 = a step
+    # at the record start). scale 1 / offset 0 is the historical dTF = 0
+    # hold. Purpose: EN4 starts in 1950, so the spin-up (and the LIA
+    # extension of the fronts) sees whatever the pre-1950 ocean is assumed
+    # to be; the two coefficients are calibrated so the free spin-up reaches
+    # the LIA extent (sweep_pre_tf.py), instead of holding the fronts at it.
+    # scale < 1 cools warm fjords more than cold ones (the climatology's
+    # geography scaled), offset shifts all alike. climatology_only still
+    # forces dTF = 0.
+    # RELEASED PIN (2026-09-29): with a pin (pin_front / pin_front_filename)
+    # and pin_release_year set, every step ending at or before that year is
+    # pinned as usual and every later step takes the TF-driven margins above
+    # (the free calving law, incl. rho_filename / pre-record hold): the
+    # observed extent of the pin at the release year is an INITIAL CONDITION
+    # for the free law, not a constraint during the record. None = a pin
+    # holds for the whole run.
+    pin_release_year: Optional[float] = None
+    pre_record_scale: float = 1.0
+    pre_record_offset: float = 0.0
+    pre_record_ramp: float = 0.0
+    # PRE-RECORD INDEX TF (2026-09-29): in addition to the hold, before the
+    # record dTF_pre(t) += pre_record_index_k * (I_s(t) - I_ref), I the
+    # annual `temp_anomaly` of model_inputs/<pre_record_index> (the Vinther /
+    # GISP2 index the atmosphere uses), I_s its centred running mean over
+    # `pre_record_index_smooth` years, I_ref the mean of I_s over ref_years
+    # (so it is referenced like EN4's dTF). k (K of TF per K of index) from
+    # EN4 front TF on the 11-yr smoothed index over 1950-2025: 0.19 all
+    # fronts, 0.28 NW, 0.31 SE (r 0.85-0.94, ~7 dof). It carries the
+    # 1920s-40s warm phase (+0.5 K of index vs 1950-79) and the 19th-century
+    # cold (-0.7 K), so pre-1950 front changes come from forcing rather than
+    # from an initial condition. None = off.
+    pre_record_index: Optional[str] = None
+    pre_record_index_k: float = 0.25
+    pre_record_index_smooth: int = 11
+    # first year the index term applies (None = the whole index); earlier
+    # years get no index term (the hold alone). The deep GISP2 part of the
+    # index has +2..+4 K 11-yr excursions that ratchet the free-law fronts
+    # back irreversibly (2026-09-29), so 1850 isolates the instrumental era.
+    pre_record_index_start: Optional[float] = None
 
 
 @dataclass(frozen=True)

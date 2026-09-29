@@ -354,8 +354,10 @@ def make_ocean_loader(forcing_dir: Path, ocean_cfg, q0: float, h00: float):
             return None
         rho_path = (Path(config.base_dir) / "model_inputs" / ocean_cfg.rho_filename
                     if getattr(ocean_cfg, "rho_filename", None) else None)
+        index_path = (Path(config.base_dir) / "model_inputs" / ocean_cfg.pre_record_index
+                      if getattr(ocean_cfg, "pre_record_index", None) else None)
         of = OceanForcing.from_file(path, 2 ** config.n_levels, ocean_cfg, q0=q0, h00=h00, lazy=True,
-                                    rho_path=rho_path)
+                                    rho_path=rho_path, index_path=index_path)
         print(of.describe())
         return of
     return load
