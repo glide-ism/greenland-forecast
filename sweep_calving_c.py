@@ -74,6 +74,7 @@ def main():
                                         calving_H_c=fs.config.calving_H_c if a.H_c is None else float(a.H_c))
     ocean = fs.config.ocean_forcing
     fs.OCEAN = dataclasses.replace(ocean, enabled=True, clim_h=0.0, clim_q=0.0, rho_filename=None, pin_front=None,
+                                   pin_front_filename=None, pin_release_year=None,
                                    alpha_h=ocean.alpha_h if a.alpha is None else float(a.alpha),
                                    alpha_q=ocean.alpha_q if a.alpha_q is None else float(a.alpha_q))
     fs.VTI_T_MIN = float(a.t_save)
