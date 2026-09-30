@@ -588,7 +588,11 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
                           if record == "standalone" else climate.describe()),
                  ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
                                 else f"constant margins q = {q0:g}, h0 = {h00:g} m"),
-                 thermal=(repr(thermal.cfg) if thermal is not None else "none (isothermal A_glen)"))
+                 thermal=(repr(thermal.cfg) if thermal is not None else "none (isothermal A_glen)"),
+                 # the run's own parameters (read these, not the config, when analysing it)
+                 calving_timescale=float(config.calving_timescale), calving_H_c=float(config.calving_H_c),
+                 calving_q=float(q0), calving_h0=float(h00), dt=float(dt), dt_schedule=repr(dt_schedule),
+                 A_glen=float(config.A_glen))
     if continue_run:
         attrs["continued_from"] = f"t={t_start:g} ({datetime.now().isoformat(timespec='seconds')}); velocity warm start reset"
         # the new segment's forcing replaces the old in the attrs (a branch --
@@ -597,7 +601,9 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
         with xr.open_dataset(out_dir / "final_state.nc") as f0:
             prev = dict(f0.attrs)
         segment = {k: attrs[k] for k in ("gcm", "scenario", "climate", "climate_mode", "apply_biases", "ocean_forcing",
-                                         "elevation_feedback", "thermal", "t_end", "continued_from", "record")}
+                                         "elevation_feedback", "thermal", "t_end", "continued_from", "record",
+                                         "calving_timescale", "calving_H_c", "calving_q", "calving_h0", "dt",
+                                         "dt_schedule", "A_glen")}
         if (str(prev.get("gcm")), str(prev.get("scenario"))) != (str(climate.gcm), str(climate.scenario)):
             segment["branched_from"] = (f"{prev.get('gcm')} {prev.get('scenario')} at t={t_start:g} "
                                         f"(climate: {prev.get('climate', '?')})")
