@@ -1354,6 +1354,69 @@ near the margins at coarse levels is the blunter alternative.
      field (fitted 2026-09-25 against v9's beta), not of the pre-record
      forcing. Re-running the per-basin c sweep on v1.1's beta is the lever.
 
+23. **Two-stage calving calibration: stage 1 is the source of truth
+   (2026-09-29, the user's design).** Stage 1 (the inversion, fronts pinned
+   to the observed history) has extracted everything the products hold;
+   stage 2 only emulates its BOUNDARY CONDITION -- the per-basin calving
+   margin c_i of `h0_i = c_i + alpha_h dTF_i` -- as a function of basin and
+   thermal forcing, so it can be projected. Pieces:
+   `forward_standalone.py --stage1 [--pin FILE]` = the stage-1 reference
+   replay (the config's yearly pin, else front_mask_lia.nc, for the whole
+   run; no release, no h0 field; raw states at 1990 / 1993 / 2008 / 2015 /
+   2018 / 2019; frames from 1980) into `{output_dir}/stage1_reference`.
+   `analysis/sweep_calving_eval.py --reference-run DIR` makes every
+   BASIN-INTEGRATED term compare with that run instead of the products (CPU,
+   state files only; `--select-only` also adds finished runs missing from
+   sweep_eval.csv and writes `sweep_eval_integrated.csv`):
+   `J_gate` (log flux ratio through the basin's Mankoff gates,
+   analysis/gates.py = the chain convention), `J_gatef` (flux-weighted gate
+   SPEED and THICKNESS log ratios, sigmas 0.15 / 0.2), `J_gatefm` (J_gatef
+   summed over `--gate-epochs` 1990 2008 2015 2018, each against the
+   reference at that epoch), `J_dhdt_int` (reach-integrated 1993-2019 change
+   vs the reference's) and `J_srf_ref` (chi2/2 of the 2008 surface misfit per
+   calving basin over cells with ice in either run). `--admissible-term
+   srf_ref --admissible-rel R`: per basin only c with J_srf_ref <= (1 + R) x
+   the basin's minimum are candidates (ratio test, so the 10 m sigma is
+   irrelevant; R is on a SQUARED quantity: 99 ~ 10x in RMS; the sum runs over
+   the whole drainage basin, a reach restriction would sharpen it); basins
+   without gates use J_srf_ref itself; a single admissible value is a
+   decision, not "unresponsive". The assembler writes h0_base = c -
+   config.calving_h0 (before 2026-09-29 raw c: a config baseline of 10 m
+   shifted every front toward calving -- enough to flip Helheim, Jakobshavn,
+   Petermann, whose good windows are 10-25 m wide). Findings (v1.1
+   isothermal, level 0, alpha_h 80, tau 1; `analysis/output/basin_mb_v1.1_
+   {calvfield,gatef,s1,s1m,s1m2,fine}/`; dM/dt Gt/yr 1986-95 / 2006-20 /
+   1986-2020; stage 1 -59 / -247 / -139, Mankoff -74 / -239 / -148):
+   * The composite reproduces each glacier's sweep state (independence
+     holds) except where glaciers share a fjord (79N / Zachariae) and at
+     Jakobshavn; the user's view: fine for now, a red-black / randomized
+     design if it ever matters.
+   * Products-referenced selection: the whitened per-cell loss ("previous
+     loss", srf vel extent dhdt_int) -> -8 / -226 / -107, gates 0.80 of
+     Mankoff; FLUX ALONE is not identifying (a filled fjord, Kanger at c
+     -12.5: thickness 1.94x, speed 0.42x, matches the flux); the factorized
+     gate term vs the products -> gates 0.99 but -8 / -347 / -167: the model
+     only carries the observed flux while its outlets retreat.
+   * Stage-1-referenced: gatef + srf_ref (10x) -> +6 / -321 / -149;
+     gatefm alone -> +12 / -338 / -150 (the 10x filter blocked the states it
+     wanted: Jakobshavn +25 is 20x the minimum); gatefm + dhdt_int (dv-rel
+     0.5, floor 0.2) with R 99 -> -23 / -299 / -148, gates 279 -> 366 (stage 1
+     317 -> 358); plus the fine grid (2.5 m around Rink and Helheim) -> -33 /
+     -300 / -154, 1993-2019 -180 (ITS_LIVE -153), 2018 gates 0.87 of Mankoff
+     (stage 1 0.88). CURRENT FIELD: `calving_h0_base_v1.1_s1m2.nc` (re-assembled
+     on the fine grid): Rink -2.5 (speed / thickness vs stage 1 1.29 / 1.04;
+     was 2.55 / 0.86 at 0), Jakobshavn +27.5, Kanger +27.5, Helheim +37.5.
+   * HELHEIM IS BISTABLE: gate thickness vs stage 1 1.42 / 1.41 / 1.19 / 1.39
+     / 0.42 / 0.48 at c 25 / 27.5 / 30 / 32.5 / 35 / 37.5 -- a jump between
+     32.5 and 35 with a chaotic outlier at 30; stage 1's pinned Helheim is not
+     a free-law state at any c. Rink had a narrow window (-2.5).
+   * Remaining 2006-20 excess vs stage 1: CW -20, NW -18, SE -13 (Helheim),
+     CE -7 Gt/yr: outlets reaching the right 2018 state through too much
+     thinning, plus Helheim; 1986-95 is out of reach of any c (the free law
+     produces no 20th-century retreat; library change 22). More c resolution
+     will not help; a calving law that can hold intermediate fronts or joint
+     selection of neighbours would.
+
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is
 now differentiated — the drag Jacobians carry d(beta xi^p)/dH and /dbed via

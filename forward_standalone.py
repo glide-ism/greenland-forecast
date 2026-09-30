@@ -679,7 +679,41 @@ def main(export_only: bool = False) -> None:
     run(setup())
 
 
+# stage-1 reference (2026-09-29): the calibrated state with the fronts pinned
+# to the observed history, the source of truth the calving selection of
+# stage 2 emulates (analysis/sweep_calving_eval.py --reference-run). Raw
+# states at the epochs every selection term reads.
+STAGE1_STATE_TIMES = (1990.0, 1993.0, 2008.0, 2015.0, 2018.0, 2019.0)
+STAGE1_DEFAULT_PIN = "front_mask_lia.nc"
+
+
+def configure_stage1(pin: Optional[str] = None, vti_from: float = 1980.0) -> Path:
+    """Set the module up for the stage-1 reference replay: the front pinned
+    for the whole run (the config's yearly pin, else `pin`, else
+    front_mask_lia.nc), no release, no h0 field; raw states at
+    STAGE1_STATE_TIMES; frames from `vti_from`; into
+    {output_dir}/stage1_reference. Returns the output directory."""
+    global OCEAN, OUT_DIR, STATE_SAVE_TIMES, VTI_T_MIN, SNAP_TIMES
+    pin = pin or getattr(config.ocean_forcing, "pin_front_filename", None) or STAGE1_DEFAULT_PIN
+    OCEAN = dataclasses.replace(config.ocean_forcing, enabled=True, pin_front_filename=pin,
+                                pin_release_year=None, rho_filename=None)
+    OUT_DIR = Path(f"{config.output_dir}/stage1_reference")
+    STATE_SAVE_TIMES = tuple(sorted(set(tuple(STATE_SAVE_TIMES) + STAGE1_STATE_TIMES)))
+    SNAP_TIMES = tuple(sorted(set(tuple(SNAP_TIMES) + STATE_SAVE_TIMES)))
+    VTI_T_MIN = float(vti_from)
+    print(f"STAGE-1 REFERENCE: front pinned to {pin} for the whole run, states at {list(STATE_SAVE_TIMES)}, "
+          f"frames from {VTI_T_MIN:g}, into {OUT_DIR}")
+    return OUT_DIR
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--export", action="store_true", help="only (re)write physical_fields.nc")
-    main(export_only=ap.parse_args().export)
+    ap.add_argument("--stage1", action="store_true",
+                    help="the stage-1 reference replay: pinned front, raw states at the observation epochs, "
+                         "into {output_dir}/stage1_reference (the reference of sweep_calving_eval.py --reference-run)")
+    ap.add_argument("--pin", default=None, help="with --stage1: the yearly front-mask file (default: the config's, else front_mask_lia.nc)")
+    args = ap.parse_args()
+    if args.stage1:
+        configure_stage1(args.pin)
+    main(export_only=args.export)

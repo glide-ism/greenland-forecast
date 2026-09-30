@@ -73,7 +73,11 @@ def cmd_run(a):
     over = {k: v for k, v in dict(alpha_h=a.alpha_h, alpha_q=a.alpha_q).items() if v is not None}
     if a.no_rho:
         over["rho_filename"] = None
+    elif a.rho_filename:
+        over["rho_filename"] = a.rho_filename
     base = dataclasses.replace(base, **over)
+    if a.calving_h0 is not None:
+        fs.H00 = float(a.calving_h0)
     if a.t_start is not None:
         fs.T_START = float(a.t_start)
     fs.T_END = float(a.t_end)
@@ -188,6 +192,7 @@ def main():
     r.add_argument("--ramp", type=float, default=0.0, help="years before the record over which the hold ramps to 0")
     r.add_argument("--alpha-h", type=float, default=None)
     r.add_argument("--alpha-q", type=float, default=None)
+    r.add_argument("--rho-filename", default=None, help="the rho / h0_base field to use instead of the config's")
     r.add_argument("--no-rho", action="store_true", help="drop the config's rho / h0_base field")
     r.add_argument("--level", type=int, default=0)
     r.add_argument("--t-start", type=float, default=None)
@@ -197,6 +202,9 @@ def main():
     r.add_argument("--vti-from", type=float, default=None, help="with --vti: frames only from this year on")
     r.add_argument("--keep-pin", action="store_true",
                    help="keep the config's front pin (a pinned reference run on the same level / window)")
+    r.add_argument("--calving-h0", type=float, default=None,
+                   help="baseline margin h00 (m; default config.calving_h0). A per-basin h0_base field from "
+                        "sweep_calving_c.py was fitted with h0 = c alone, so run it with 0")
     r.add_argument("--index-k", type=float, default=None,
                    help="add the index-scaled pre-record TF with this k (K/K; config pre_record_index_k)")
     r.add_argument("--index", default="temperature_anomaly.nc")

@@ -43,7 +43,70 @@ without a marine terminus and the unassigned cells. Written as
 with `ocean_forcing.rho_filename="calving_h0_base.nc"`: OceanForcing adds
 h0_base(x) to the margin, h0 = calving_h0 + h0_base + alpha_h dTF) and
 `calving_c_basins.csv`. One joint run of the assembled field is the
-actual test of the independence approximation.
+actual test of the independence approximation (checked 2026-09-29 on v1.1:
+the composite reproduces each glacier's sweep state -- Helheim, Petermann,
+Kanger, Rink identical -- Jakobshavn excepted, which interacts).
+
+The sweep runs h0 = c alone (forward_standalone's H00 = c), while the
+composite adds `calving_h0` to h0_base; so the field is written as
+h0_base = c - config.calving_h0 and the composite equals the sweep whatever
+the config's baseline (before 2026-09-29 it was c, and a config with
+calving_h0 = 10 shifted every front 10 m toward calving -- enough to flip
+Helheim, Jakobshavn and Petermann, whose good windows are 10-25 m wide).
+
+BASIN-INTEGRATED TERMS (CPU, from the state files; the whitened per-cell
+terms cannot see a smooth trunk-scale error and are exquisitely sensitive
+to a front position no model will place exactly): `J_dhdt_int`, the
+volume-integrated 1993-2019 rate over a zone, and `J_gate`, the discharge
+through the basin's Mankoff gates (calving_basins.csv `gates`) at
+`--gate-year` (2018, the velocity epoch) against the SAME integral of the
+observations the inversion fits -- the ITS_LIVE mosaic x `thickness_obs`
+of the model inputs on the model grid, chain convention (analysis/gates.py)
+-- as chi2/2 of the log ratio, sigma `--gate-sigma` (0.15), `--gate-eps`
+(0.1 Gt/yr) regularizing the log. Mankoff's D stays validation: only our
+own velocity and thickness enter. Basins without gates contribute 0.
+Select with e.g. `--select-terms gate dhdt_int`.
+FLUX ALONE IS NOT IDENTIFYING (2026-09-29): flux = speed x thickness, and a
+filled fjord (Kangerlussuaq at c -12.5: gate thickness 1.94x, speed 0.42x)
+matches the observed flux as well as the observed front does. `J_gatef`
+(`--select-terms gatef`) penalizes the two factors separately -- the
+flux-weighted (weights L |v_obs| H_obs) gate speed and thickness ratios over
+the basin's gates, chi2/2 of log(ratio) / `--gate-speed-sigma` (0.15) and
+/ `--gate-thick-sigma` (0.2; looser because the spin-up thickens the trunks
+1.1-1.3x even with the fronts pinned) -- strictly more information than the
+flux, still integrated over the basin's gates and still only our own
+observations. SURFACE ADMISSIBILITY (`--admissible-term srf`): per basin
+only the c values whose J_srf is within (1 + `--admissible-rel`) of that
+basin's minimum (default 9, i.e. 10x) are candidates; the filled-fjord
+branch costs 15-50x the minimum there (Kanger 185 vs 6, Helheim 330 vs 10,
+Jakobshavn 209 vs 4, Daugaard-Jensen 64 vs 4) while states on the right
+branch vary by 1-5x, so the surface term picks the BRANCH and the gate
+factors pick the member. Basins without gates fall back to J_srf within
+the admissible set.
+
+STAGE 1 AS THE SOURCE OF TRUTH (`--reference-run DIR`, 2026-09-29, the
+user's design): stage 1 (the inversion, fronts pinned to the observed
+history) has already extracted everything the products hold; stage 2 only
+emulates its boundary condition as a function of basin and thermal
+forcing. With a reference run -- `forward_standalone.py --stage1`, raw
+states at the epochs in {output_dir}/stage1_reference -- every integrated
+term compares with THAT run instead of the products: J_gate / J_gatef with
+its gate flux, speed and thickness (weights L |v_ref| H_ref), J_dhdt_int
+with its reach-integrated 1993-2019 rate, and a new `J_srf_ref`, chi2/2 of
+(S - S_ref) / `--srf-ref-sigma` (10 m) at `--srf-year` (2008) over each
+basin's cells holding ice in either run -- the admissibility term under
+this design (`--admissible-term srf_ref`). The whitened per-cell terms of
+the GPU evaluation still refer to the products and are best left out of
+the selection. `J_gatefm` (`--select-terms gatefm`, reference only) is
+J_gatef summed over `--gate-epochs` (1990 2008 2015 2018), each epoch's
+speed / thickness ratios against the reference AT THAT EPOCH (weights from
+its flux density): a 2018 snapshot cannot tell a steady front from one
+that reached the 2018 state through a collapse inside the window (the CW
+overshoot of the first stage-1-referenced composite, 2006-20 -94 vs -53).
+Why: against the products the gate term chases a flux the
+model only carries while its outlets retreat (0.99 of Mankoff at 2018 and
+GrIS 2006-20 -347 vs -239 Gt/yr); against stage 1 the target is a state
+the model holds.
 
 Usage:
   python analysis/sweep_calving_eval.py --sweep-root domains/greenland/inverse_v9/sweep_c
@@ -236,6 +299,21 @@ def main():
     ap.add_argument("--bad-run-factor", type=float, default=5.0,
                     help="a run whose domain total of any term exceeds this multiple of the median over runs, or is non-finite, is excluded")
     ap.add_argument("--out", default=None, help="h0_base file name under model_inputs/ (default calving_h0_base.nc)")
+    ap.add_argument("--gates", default=str(HERE.parent / "common_data/dhdt/mankoff/dataverse_files/gates.gpkg"))
+    ap.add_argument("--gate-year", type=float, default=2018.0, help="epoch of J_gate (a state file must exist)")
+    ap.add_argument("--gate-sigma", type=float, default=0.15, help="std of log(D_model / D_obs) in J_gate")
+    ap.add_argument("--gate-eps", type=float, default=0.1, help="Gt/yr added to both fluxes inside the log")
+    ap.add_argument("--gate-speed-sigma", type=float, default=0.15, help="J_gatef: std of log gate speed ratio")
+    ap.add_argument("--gate-thick-sigma", type=float, default=0.2, help="J_gatef: std of log gate thickness ratio")
+    ap.add_argument("--admissible-term", default=None,
+                    help="per basin, only c values with J_<term> <= Jmin (1 + --admissible-rel) are candidates (e.g. srf)")
+    ap.add_argument("--admissible-rel", type=float, default=9.0)
+    ap.add_argument("--reference-run", default=None,
+                    help="stage-1 reference run dir (forward_standalone.py --stage1): the integrated terms compare with it, not the products")
+    ap.add_argument("--srf-year", type=float, default=2008.0, help="epoch of J_srf_ref")
+    ap.add_argument("--gate-epochs", type=float, nargs="+", default=[1990.0, 2008.0, 2015.0, 2018.0],
+                    help="epochs of J_gatefm (reference run only; state files must exist in both runs)")
+    ap.add_argument("--srf-ref-sigma", type=float, default=10.0, help="m, J_srf_ref")
     a = ap.parse_args()
 
     domain = Path(a.domain_path)
@@ -277,11 +355,92 @@ def main():
     print(f"integrated dh/dt term over the '{a.dv_zone}' zone ({int(zone.sum())} ice cells), {dh['t0']:g}-{dh['t1']:g}, "
           f"sigma = max({a.dv_floor:g} Gt/yr, {a.dv_rel:g} x |observed|)")
 
+    # the gate term: the observations' own flux through each basin's gates,
+    # or with --reference-run the stage-1 run's
+    from gates import ChainGates
+    G = ChainGates(a.gates, gi.x.values, gi.y.values, gi.vx.values, gi.vy.values)
+    gate_ids = [[] if pd.isna(binfo.gates.get(i, np.nan)) else [int(float(g)) for g in str(binfo.gates.get(i)).split()]
+                for i in range(nb)]
+    ny0 = gi.sizes["y"]
+
+    def fields(run, t):
+        """Cell-centred U, V, H, S of a run's raw state at t on the fine grid."""
+        S = xr.open_dataset(Path(run) / f"state_{t:g}.nc")
+        u, v, H, srf = S.u_s.values, S.v_s.values, S.H.values, S.srf.values
+        S.close()
+        U, V = 0.5 * (u[:, :-1] + u[:, 1:]), 0.5 * (v[:-1] + v[1:])
+        f = ny0 // H.shape[0]
+        if f > 1:                                   # a coarse-level run: repeat onto the fine grid
+            U, V, H, srf = (np.kron(q, np.ones((f, f))) for q in (U, V, H, srf))
+        return U, V, H, srf
+
+    per_basin = lambda df, col: np.array([float(df[col].reindex(ids).fillna(0.0).sum()) if ids else np.nan
+                                          for ids in gate_ids] + [np.nan])
+    if a.reference_run:
+        ref = Path(a.reference_run)
+        Ur, Vr, Hr, _ = fields(ref, a.gate_year)
+        ref_desc = f"the stage-1 reference {ref}"
+    else:
+        Ur, Vr, Hr = (np.nan_to_num(gi[k].values) for k in ("vx", "vy", "thickness_obs"))
+        ref_desc = "ITS_LIVE x thickness_obs"
+    ref_g = G.flux(Ur, Vr, Hr).set_index("gate")
+    D_obs = per_basin(ref_g, "D")
+    print(f"gate terms at {a.gate_year:g}: {sum(bool(i) for i in gate_ids)} basins with gates, reference flux "
+          f"{np.nansum(D_obs):.0f} Gt/yr ({ref_desc}, chain); sigma(log) flux {a.gate_sigma:g}, "
+          f"speed {a.gate_speed_sigma:g}, thickness {a.gate_thick_sigma:g}")
+    if a.reference_run:
+        dV_ref, _ = integrated_dhdt(ref, dh, zone, nb)
+        _, _, H_s, S_s = fields(ref, a.srf_year)
+        ref_srf = (S_s, H_s)
+        print(f"integrated dh/dt and surface ({a.srf_year:g}, sigma {a.srf_ref_sigma:g} m) against the reference too")
+
+    ref_ep = {t: fields(ref, t)[:3] for t in a.gate_epochs} if a.reference_run else {}
+    if ref_ep:
+        print("multi-epoch gate term against the reference at " + ", ".join(
+            f"{t:g} ({np.nansum(per_basin(G.flux(*ref_ep[t]).set_index('gate'), 'D')):.0f} Gt/yr)" for t in a.gate_epochs))
+
+    def factor_z2(U, V, H, R):
+        fa = G.factors(U, V, H, *R)
+        rs = per_basin(fa, "s_m") / per_basin(fa, "s_o")
+        rh = per_basin(fa, "h_m") / per_basin(fa, "h_o")
+        z2 = (np.log(np.maximum(rs, 0.01)) / a.gate_speed_sigma) ** 2 + (np.log(np.maximum(rh, 0.01)) / a.gate_thick_sigma) ** 2
+        return rs, rh, z2
+
+    def gate_flux(run):
+        U, V, H, _ = fields(run, a.gate_year)
+        mg = G.flux(U, V, H).set_index("gate")
+        rs, rh, _ = factor_z2(U, V, H, (Ur, Vr, Hr))
+        return per_basin(mg, "D"), rs, rh
+
     def add_integrated(table, run):
         m, o = integrated_dhdt(run, dh, zone, nb)
+        if a.reference_run:
+            o = dV_ref
         sig = np.maximum(a.dv_floor, a.dv_rel * np.abs(o))
         table["dV_model"] = m; table["dV_obs"] = o
         table["J_dhdt_int"] = cfg.loss_scale * 0.5 * ((m - o) / sig) ** 2 * 1e3      # chi2/2 per basin, in J units x 1e3 (one number, not a cell sum)
+        Dm, rs, rh = gate_flux(run)
+        table["D_gate_model"] = Dm; table["D_gate_obs"] = D_obs
+        r = np.log((Dm + a.gate_eps) / (D_obs + a.gate_eps)) / a.gate_sigma
+        table["J_gate"] = np.where(np.isfinite(r), cfg.loss_scale * 0.5 * r ** 2 * 1e3, 0.0)   # same units as J_dhdt_int
+        table["gate_speed_ratio"] = rs; table["gate_thick_ratio"] = rh
+        zs = np.log(np.maximum(rs, 0.01)) / a.gate_speed_sigma
+        zh = np.log(np.maximum(rh, 0.01)) / a.gate_thick_sigma
+        jf = cfg.loss_scale * 0.5 * (zs ** 2 + zh ** 2) * 1e3
+        table["J_gatef"] = np.where(np.isfinite(jf), jf, 0.0)
+        if ref_ep:
+            tot = np.zeros(nb + 1)
+            for t, R in ref_ep.items():
+                U, V, H, _ = fields(run, t)
+                _, _, z2 = factor_z2(U, V, H, R)
+                tot += np.where(np.isfinite(z2), z2, 0.0)
+            table["J_gatefm"] = cfg.loss_scale * 0.5 * tot * 1e3
+        if a.reference_run:
+            _, _, H, S = fields(run, a.srf_year)
+            S_r, H_r = ref_srf
+            cells = (H > 10.0) | (H_r > 10.0)
+            z2 = np.where(cells, ((S - S_r) / a.srf_ref_sigma) ** 2, 0.0)
+            table["J_srf_ref"] = cfg.loss_scale * 0.5 * np.bincount(bidx.ravel(), weights=z2.ravel(), minlength=nb + 1)[:nb + 1]
         return table
 
     if a.select_only:
@@ -290,7 +449,17 @@ def main():
         parts = []
         for run_name, t in long.groupby("run"):
             parts.append(add_integrated(t.copy(), root / run_name))
+        # finished runs not yet in the csv (a refinement sweep): the basin-integrated
+        # terms alone (per-cell terms need the GPU evaluation; select on gate / dhdt_int)
+        new = [r for r in runs if r.name not in set(long.run)]
+        for run in new:
+            t = pd.DataFrame(dict(basin=np.arange(nb + 1), name=list(names) + ["<unassigned>"], region=list(region) + [""]))
+            t = add_integrated(t, run); t["c"] = cs[run.name]; t["run"] = run.name
+            parts.append(t)
+        if new:
+            print(f"added {len(new)} runs not in the csv with the integrated terms only: {[r.name for r in new]}")
         long = pd.concat(parts, ignore_index=True)
+        long.to_csv(root / "sweep_eval_integrated.csv", index=False)
     else:
         prob = build_problem(cfg, a.terms)
         nyc, nxc = prob.ny, prob.nx
@@ -318,10 +487,12 @@ def main():
     if not a.assemble:
         return
     # ------------------------------------------------------------ good runs, the selection objective
-    jcols = [c for c in long.columns if c.startswith("J_") and c not in ("J_total", "J_dhdt_int")]
-    tot = long.groupby("c")[jcols].sum()
+    jcols = [c for c in long.columns if c.startswith("J_") and c not in ("J_total", "J_dhdt_int", "J_gate", "J_gatef", "J_gatefm", "J_srf_ref")]
+    tot = long.groupby("c")[jcols].sum(min_count=1)
     med = tot.median()
-    bad = tot.index[(~np.isfinite(tot)).any(axis=1) | (tot > a.bad_run_factor * med).any(axis=1)]
+    selc = [c for c in jcols if a.select_terms is None or c[2:] in a.select_terms]
+    tsel = tot[selc] if selc else tot.iloc[:, :0]
+    bad = tot.index[(~np.isfinite(tsel)).any(axis=1) | (tsel > a.bad_run_factor * med[selc]).any(axis=1)] if selc else tot.index[:0]
     if len(bad):
         print("EXCLUDED runs (non-finite or collapsed: a domain total more than "
               f"{a.bad_run_factor:g}x the median over runs): " + ", ".join(f"c {c:+g}" for c in bad))
@@ -333,7 +504,18 @@ def main():
         raise SystemExit(f"--select-terms not in the evaluation: {missing}; evaluated: {jcols}")
     good["J_sel"] = good[sel_terms].sum(axis=1)
     print(f"selection objective: {' + '.join(sel_terms)}; plateau: J <= Jmin (1 + {a.plateau_rel:g}) + {a.plateau_abs:g}")
-    piv = good.pivot_table(index="basin", columns="c", values="J_sel")
+    piv = good.pivot_table(index="basin", columns="c", values="J_sel", dropna=False)
+    adm = None
+    if a.admissible_term:
+        acol = f"J_{a.admissible_term}"
+        if acol not in good.columns:
+            raise SystemExit(f"--admissible-term {a.admissible_term}: {acol} not evaluated")
+        adm = good.pivot_table(index="basin", columns="c", values=acol, dropna=False)
+        print(f"admissible c per basin: {acol} <= Jmin (1 + {a.admissible_rel:g})")
+    # basins without gates have J_gate(f) = 0 everywhere; with an admissibility
+    # term they fall back to it (their plateau is then the admissible set's best)
+    gate_sel = any(t in sel_terms for t in ("J_gate", "J_gatef", "J_gatefm"))
+    has_gate = np.array([bool(ids) for ids in gate_ids])
     cgrid = np.array(sorted(piv.columns))
     calves = binfo.reindex(range(nb)).calves.fillna(False).astype(bool).values
     flux = binfo.reindex(range(nb)).terminus_flux_m2yr.fillna(0.0).values
@@ -342,18 +524,27 @@ def main():
         if b not in piv.index:
             continue
         J = piv.loc[b, cgrid].values.astype(float)
-        if not np.isfinite(J).all() or not calves[b]:
+        if adm is not None and b in adm.index:
+            A = adm.loc[b, cgrid].values.astype(float)
+            if np.isfinite(A).any():
+                okA = np.isfinite(A) & (A <= np.nanmin(A) * (1.0 + a.admissible_rel))
+                if gate_sel and not has_gate[b]:
+                    J = A.copy()                           # no gates: the admissibility term itself
+                J = np.where(okA, J, np.inf)
+        if not np.isfinite(J).any() or not calves[b]:
             rows.append(dict(basin=b, name=names[b], region=region[b], calves=bool(calves[b]), Jmin=np.nan, Jrange=np.nan, c=np.nan, source="none"))
             continue
         if flux[b] < a.min_flux:
             rows.append(dict(basin=b, name=names[b], region=region[b], calves=True, Jmin=J.min(), Jrange=J.max() - J.min(), c=np.nan, source="small"))
             continue
-        jmin, jmax = J.min(), J.max()
+        fin = np.isfinite(J)
+        jmin, jmax = J[fin].min(), J[fin].max()
         rng = jmax - jmin
-        if rng < a.min_range * max(abs(jmin), 1e-12):
+        # a single admissible value is a decision, not an unresponsive basin
+        if fin.sum() > 1 and rng < a.min_range * max(abs(jmin), 1e-12):
             rows.append(dict(basin=b, name=names[b], region=region[b], calves=True, Jmin=jmin, Jrange=rng, c=np.nan, source="unresponsive"))
             continue
-        ok = np.flatnonzero(J <= jmin * (1.0 + a.plateau_rel) + a.plateau_abs)
+        ok = np.flatnonzero(fin & (J <= jmin * (1.0 + a.plateau_rel) + a.plateau_abs))
         # the centre of the plateau: the member nearest its mean c, ties to the argmin
         cm = cgrid[ok].mean(); d = np.abs(cgrid[ok] - cm)
         cand = ok[d <= d.min() + 1e-9]
@@ -386,7 +577,10 @@ def main():
     for n in key:
         r = sel[sel.name == n].iloc[0]
         row = good[(good.name == n) & (good.c == r.c)]
-        dv = f"  dV {row.dV_model.iloc[0]:+.2f} vs {row.dV_obs.iloc[0]:+.2f}" if len(row) else ""
+        dv = (f"  dV {row.dV_model.iloc[0]:+.2f} vs {row.dV_obs.iloc[0]:+.2f}"
+              + (f"  gate {row.D_gate_model.iloc[0]:.1f} vs {row.D_gate_obs.iloc[0]:.1f} Gt/yr"
+                 f" (speed {row.gate_speed_ratio.iloc[0]:.2f}, thickness {row.gate_thick_ratio.iloc[0]:.2f})"
+                 if np.isfinite(row.D_gate_obs.iloc[0]) else "")) if len(row) else ""
         print(f"  {n[:26]:26s} c {r.c:+5.0f} ({r.source})" + (f"  Jmin {r.Jmin:.3f} at {r.c_argmin:+g}, plateau [{r.plateau}]" if r.source == 'fit' else '') + dv)
 
     # ------------------------------------------------------------ the field on the full grid
@@ -395,17 +589,24 @@ def main():
     cvec = np.full(nb, global_c, np.float32)
     for b, r in sel.iterrows():
         cvec[b] = r.c
-    h0_base = np.where(bfull >= 0, cvec[np.clip(bfull, 0, nb - 1)], global_c).astype(np.float32)
+    # the sweep ran h0 = c alone; the composite adds calving_h0, so subtract it here
+    h00 = float(cfg.calving_h0)
+    h0_base = (np.where(bfull >= 0, cvec[np.clip(bfull, 0, nb - 1)], global_c) - h00).astype(np.float32)
     out = domain / "model_inputs" / (a.out or "calving_h0_base.nc")
     ds = xr.Dataset(dict(h0_base=(("y", "x"), h0_base), calving_basin=(("y", "x"), bfull.astype(np.int32))),
                     coords=dict(y=full.y.values, x=full.x.values))
     ds.h0_base.attrs.update(units="m", long_name="per-basin calving margin baseline c_i",
-                            description="h0 = calving_h0 + h0_base + alpha_h dTF (ocean.py); from sweep_calving_eval.py --assemble")
+                            description=f"h0 = calving_h0 + h0_base + alpha_h dTF (ocean.py); h0_base = c_i - calving_h0 "
+                                        f"({h00:g} m at assembly), so the composite's margin is the sweep's c_i; "
+                                        f"from sweep_calving_eval.py --assemble")
     ds.attrs.update(source=f"sweep_calving_eval.py {date.today().isoformat()}", sweep_root=str(root),
                     alpha_h=sweep["alpha_h"], alpha_q=sweep["alpha_q"], c_grid=json.dumps([float(c) for c in cgrid]),
                     terms=" ".join(a.terms), select_terms=" ".join(sel_terms), plateau_rel=a.plateau_rel, plateau_abs=a.plateau_abs,
                     min_range=a.min_range, basin_var=a.basin_var, excluded_runs=json.dumps([float(c) for c in bad]), min_flux=a.min_flux,
-                    regional_default=json.dumps(regional), global_default=global_c)
+                    regional_default=json.dumps(regional), global_default=global_c, calving_h0_subtracted=h00,
+                    gate_year=a.gate_year, gate_sigma=a.gate_sigma, gate_speed_sigma=a.gate_speed_sigma,
+                    gate_thick_sigma=a.gate_thick_sigma, admissible_term=str(a.admissible_term), admissible_rel=a.admissible_rel,
+                    reference_run=str(a.reference_run))
     if "spatial_ref" in full:
         ds["spatial_ref"] = full["spatial_ref"]
         ds.h0_base.attrs["grid_mapping"] = "spatial_ref"
