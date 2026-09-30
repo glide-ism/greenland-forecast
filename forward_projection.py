@@ -32,16 +32,28 @@ handed to the record is the calibrated one:
     record year on, annual steps carry each year's monthly fields (a step
     spanning several years takes their overlap-weighted mean); after the
     last year the last year holds;
-  * CLIMATE_MODE "raw": the SMB model sees the ISMIP7 monthly fields as they
+  * CLIMATE_MODE "anomaly" (the DEFAULT since 2026-09-30): the calibration's
+    own monthly climatology -- config.gridded_filename, i.e. the CLIMATE the
+    inversion ran on (hybrid: CARRA2 100 m temperature + RACMO
+    precipitation) -- + the calibrated biases, with the ISMIP7 departure from
+    its own 1986-2025 climatology (tas - tas_clim additive, pr / pr_clim
+    multiplicative). The baseline is what the calibration saw, so tbias /
+    pbias mean what they were fitted to mean;
+    CLIMATE_MODE "raw": the SMB model sees the ISMIP7 monthly fields as they
     are (2 m temperature from the dEBM2 downscaling, degC; precipitation as
     m ice / yr), nearest-filled onto the 12% of ice cells outside the
-    product's footprint, plus the calibrated biases when APPLY_BIASES
-    (tbias additive, exp(log_pbias) multiplicative -- calibrated against
-    CARRA2, so they are a choice here, not a given);
-    CLIMATE_MODE "anomaly": the calibrated CARRA2 climatology + biases, with
-    the ISMIP7 departure from its own climatology over the same window
-    (tas - tas_clim additive, pr / pr_clim multiplicative). This is the
-    bias-corrected option; the raw run shows whether it is needed;
+    product's footprint, plus the calibrated biases when APPLY_BIASES --
+    biases fitted against another climatology (dEBM2 is 3.5 K colder than
+    CARRA2 in the annual mean, 12 % drier), kept as a sensitivity;
+  * `--record standalone` (the OCX run, 2026-09-30): NO ISMIP7 atmosphere at
+    all -- every step takes forward_standalone's compute_smb, i.e. exactly
+    the inversion's forcing (the yearly reanalysis fields of
+    config.yearly_climate_filename over their record, 1986-2025 for the
+    hybrid; the Vinther index before), plus the elevation feedback through
+    forward_standalone's ctx.t2m_offset hook; the forcing directory supplies
+    only the ocean TF (CARRA2_ocx links the EN4 file the inversion used).
+    CARRA2_ocx's own tas / pr are CARRA2 in both variables -- 15 % wetter
+    than the hybrid's RACMO precipitation the pbias was fitted against;
   * the ocean forcing keeps the config's OceanForcingConfig semantics
     (statistic, ref_years, tf_crit, clim_*, alpha_*) on the CESM2 record:
     TF_clim is CESM2's own 1950-79 mean, dTF its departure from it;
@@ -102,7 +114,7 @@ LEVEL = 0                         # run level (0 = 1 km)
 T_START, T_END = None, 2301.0
 DT = None                         # step before the record; None = config.dt
 DT_SCHEDULE = ((1850.0, 1.0),)    # annual steps from the record's first year on
-CLIMATE_MODE = "raw"              # "raw" | "anomaly" (see the docstring)
+CLIMATE_MODE = "anomaly"          # "anomaly" | "raw" (see the docstring)
 APPLY_BIASES = True               # raw mode: add tbias, multiply by exp(log_pbias)
 PR_RATIO_MAX = 5.0                # anomaly mode: cap on pr / pr_clim
 SNAPSHOT_EVERY = 10.0             # years between snapshots.nc records (0 = final only)
@@ -278,7 +290,7 @@ class ElevationFeedback:
 
 
 def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: Optional[ElevationFeedback] = None,
-                     pre_record: str = "climatology"):
+                     pre_record: str = "climatology", record: str = "ismip7"):
     """Replace ctx.compute_smb: the enthalpy SMB model on the fine grid with
     the ISMIP7 monthly forcing of the step (+ the surface-elevation feedback
     when given). Records the forcing's ice-sheet means in ctx.forcing_stats
@@ -291,6 +303,8 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: O
     standalone_smb = ctx.compute_smb                          # forward_standalone's closure (setup)
     if pre_record not in ("climatology", "standalone"):
         raise ValueError(f"pre_record {pre_record!r}")
+    if record not in ("ismip7", "standalone"):
+        raise ValueError(f"record {record!r}")
     nan_stats = {k: float("nan") for k in ("tas_ice_annual", "tas_ice_jja", "pr_ice_annual", "t2m_model_jja",
                                             "precip_model_annual", "smb_ice_mean", "dS_ice_mean", "dT_feedback_jja")}
     ice = cp.asarray(ctx.gd.rgi_mask.values, dtype=bool)
@@ -303,9 +317,15 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: O
         raise ValueError(f"CLIMATE_MODE {mode!r}")
 
     def compute_smb(t_prev: float, t_next: float) -> cp.ndarray:
-        if pre_record == "standalone" and t_next <= climate.years[0] + 1e-6:
+        if record == "standalone" or (pre_record == "standalone" and t_next <= climate.years[0] + 1e-6):
+            # the inversion's own forcing (forward_standalone), + the elevation feedback
+            dT_fb = feedback.dT(t_prev) if feedback is not None else None
+            ctx.t2m_offset = dT_fb
             smb = standalone_smb(t_prev, t_next)
-            ctx.forcing_stats = dict(nan_stats, smb_ice_mean=float(smb[ice].mean()))
+            ctx.t2m_offset = None
+            ctx.forcing_stats = dict(nan_stats, smb_ice_mean=float(smb[ice].mean()),
+                                     dS_ice_mean=float(feedback.dS_fine[ice].mean()) if dT_fb is not None else 0.0,
+                                     dT_feedback_jja=float(dT_fb[5:8][:, ice].mean()) if dT_fb is not None else 0.0)
             return smb
         tas_np, pr_np = climate.monthly(t_prev, t_next)
         tas, pr = cp.asarray(tas_np), cp.asarray(pr_np)
@@ -508,7 +528,7 @@ def resume_state(out_dir: Path, ctx: fs.Run, level: int, feedback: Optional["Ele
 
 def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: float,
         dt: float, dt_schedule, mode: str, ocean_cfg, elevation_feedback: bool = ELEVATION_FEEDBACK,
-        continue_run: bool = False, pre_record: str = "climatology") -> None:
+        continue_run: bool = False, pre_record: str = "climatology", record: str = "ismip7") -> None:
     q0, h00 = fs.Q0, fs.H00
     out_dir.mkdir(parents=True, exist_ok=True)
     ctx = fs.setup(level=level, out_dir=out_dir,
@@ -531,7 +551,10 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
     # over a millennial spin-up is the flat-hold bias the deep forcing work
     # removed. Refused rather than warned: it costs a whole run to discover.
     pre_span = float(climate.years[0]) - t_start
-    if pre_record == "climatology" and pre_span > 200.0:
+    if record == "standalone":
+        print(f"--record standalone: the inversion's own forcing for EVERY step ({config.gridded_filename}, yearly "
+              f"{config.yearly_climate_filename}, the index outside its record); {forcing_dir} supplies the ocean TF only")
+    elif pre_record == "climatology" and pre_span > 200.0:
         raise SystemExit(
             f"--pre-record climatology would hold the {climate.pre_years[0]}-{climate.pre_years[1]} "
             f"GCM climatology for {pre_span:.0f} yr before the record, with no anomaly index, "
@@ -543,7 +566,7 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
              f"{', precip multiplier' if getattr(_cfg, 'alpha_precip', 0.0) else ''}"
              f"{', interannual quadrature' if getattr(_cfg, 'interannual_sigma', None) else ''})"
              if pre_record == "standalone" else f"the {climate.pre_years[0]}-{climate.pre_years[1]} climatology"))
-    ctx.compute_smb = make_compute_smb(ctx, climate, mode, feedback, pre_record)
+    ctx.compute_smb = make_compute_smb(ctx, climate, mode, feedback, pre_record, record)
     ctx.forcing_stats = {}
     vol_prev = 0.0
     if continue_run:
@@ -554,10 +577,15 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
 
     thermal = getattr(ctx, "thermal", None)
     attrs = dict(level=level, t_start=t_start, t_end=t_end, gcm=climate.gcm, scenario=climate.scenario,
-                 climate_mode=mode, apply_biases=int(APPLY_BIASES), checkpoint=str(fs.CHECKPOINT),
-                 pre_record=pre_record,
+                 climate_mode=("standalone" if record == "standalone" else mode),
+                 apply_biases=int(APPLY_BIASES), checkpoint=str(fs.CHECKPOINT),
+                 pre_record=pre_record, record=record,
+                 calibration_climate=f"{config.gridded_filename} + yearly {config.yearly_climate_filename}",
                  elevation_feedback=(feedback.describe() if feedback is not None else "off"),
-                 crs_wkt=ctx.crs.to_wkt(), climate=climate.describe(),
+                 crs_wkt=ctx.crs.to_wkt(),
+                 climate=(f"the inversion's forcing: {config.gridded_filename}, yearly {config.yearly_climate_filename} "
+                          f"(+ tbias / pbias, elevation feedback); ocean from {climate.describe()}"
+                          if record == "standalone" else climate.describe()),
                  ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
                                 else f"constant margins q = {q0:g}, h0 = {h00:g} m"),
                  thermal=(repr(thermal.cfg) if thermal is not None else "none (isothermal A_glen)"))
@@ -569,7 +597,7 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
         with xr.open_dataset(out_dir / "final_state.nc") as f0:
             prev = dict(f0.attrs)
         segment = {k: attrs[k] for k in ("gcm", "scenario", "climate", "climate_mode", "apply_biases", "ocean_forcing",
-                                         "elevation_feedback", "thermal", "t_end", "continued_from")}
+                                         "elevation_feedback", "thermal", "t_end", "continued_from", "record")}
         if (str(prev.get("gcm")), str(prev.get("scenario"))) != (str(climate.gcm), str(climate.scenario)):
             segment["branched_from"] = (f"{prev.get('gcm')} {prev.get('scenario')} at t={t_start:g} "
                                         f"(climate: {prev.get('climate', '?')})")
@@ -667,6 +695,9 @@ def main() -> None:
     ap.add_argument("--pre-record", default="climatology", choices=("climatology", "standalone"),
                     help="forcing before the record's first year: the pre-record climatology (projections) or "
                          "forward_standalone's CARRA2 climatology + Vinther anomaly (the OCX run)")
+    ap.add_argument("--record", default="ismip7", choices=("ismip7", "standalone"),
+                    help="the atmosphere over the record: the ISMIP7 fields (tas / pr) or, for OCX, the inversion's own "
+                         "forcing (forward_standalone: the config's yearly reanalysis fields) for every step")
     ap.add_argument("--no-elevation-feedback", action="store_true",
                     help="keep the forcing temperature on the observed DEM (the pre-2026-09-17 behaviour)")
     ap.add_argument("--continue", dest="continue_run", action="store_true",
@@ -684,7 +715,7 @@ def main() -> None:
     run(a.level, out_dir, forcing_dir, float(a.t_start), float(a.t_end), float(DT), DT_SCHEDULE,
         a.mode, ocean_cfg,
         elevation_feedback=ELEVATION_FEEDBACK and not a.no_elevation_feedback, continue_run=a.continue_run,
-        pre_record=a.pre_record)
+        pre_record=a.pre_record, record=a.record)
 
 
 if __name__ == "__main__":

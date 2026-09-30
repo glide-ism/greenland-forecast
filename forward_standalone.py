@@ -423,8 +423,16 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
                                         np.random.default_rng(config.enthalpy_seed))
     domain_mask = cp.asarray(gd.domain_mask.values, dtype=bool)
 
+    # ctx.t2m_offset: an optional (12, ny, nx) fine-grid temperature increment
+    # added to every evaluation (forward_projection's elevation feedback when
+    # it drives the whole run with this forcing, --record standalone); None here
+    ctx.t2m_offset = None
+
+    def _off():
+        return 0.0 if ctx.t2m_offset is None else ctx.t2m_offset
+
     def smb_index(shift, precip_multiplier: float = 1.0) -> cp.ndarray:
-        g.temperature.t2m.set(t2m + shift)
+        g.temperature.t2m.set(t2m + shift + _off())
         g.precipitation.precip.set(precip if precip_multiplier == 1.0
                                    else precip * precip_multiplier)
         smb_model.forward(temp_deviations=temp_dev)
@@ -436,7 +444,7 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
         # the reanalysis year + the calibrated biases (forward.YearField);
         # also returns the year's annual-mean temperature anomaly
         anom = cp.asarray(yearly.t2m_anomaly(year))
-        g.temperature.t2m.set(t2m + anom + tbias)
+        g.temperature.t2m.set(t2m + anom + tbias + _off())
         g.precipitation.precip.set(precip * cp.asarray(yearly.precip_ratio(year)))
         smb_model.forward(temp_deviations=temp_dev)
         return g.state.smb.data.mean(axis=0), (anom.mean(axis=0) if anom.ndim == 3 else anom)
@@ -454,6 +462,8 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
         # the step's annual-mean forcing air temperature (degC, + tbias), the
         # thermal model's surface temperature under ThermalConfig.surface_T="forcing"
         T_ann = cp.zeros_like(t2m[0])
+        if ctx.t2m_offset is not None:
+            T_ann += sum(w for _, w in weights) * ctx.t2m_offset.mean(axis=0)
         for y, w in on_record:
             smb_y, anom_y = smb_year(y)
             smb += w * smb_y

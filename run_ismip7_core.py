@@ -20,7 +20,12 @@ snapshots.nc, final_state.nc -- copied) and continued with
 `forward_projection.py --continue` on the scenario's forcing (the thermal
 state and the elevation-feedback reference come along; velocities restart
 from zero, one solve's worth of extra V-cycles). The branch records
-`branched_from` in its attrs. OCX is its own run (CARRA2 from 1986).
+`branched_from` in its attrs. OCX is its own run on the INVERSION's forcing
+(`--record standalone`: the config's yearly reanalysis fields -- the hybrid
+CARRA2 temperature + RACMO precipitation -- over 1986-2025, the Vinther index
+before; only the ocean TF comes from model_inputs/ismip7/CARRA2_ocx, the EN4
+file). The GCM runs use `--mode anomaly` (default): the calibration's own
+climatology + biases + the GCM's departure from its 1986-2025 climatology.
 
 Every run uses domains/greenland/config.py AS IT STANDS (results_subdir,
 checkpoint, calving field, thermal settings): the first invocation writes
@@ -67,12 +72,12 @@ def plan():
     jobs = []
     for g in GCMS:
         jobs.append(dict(name=f"historical_{g}", gcm=g, scenario=HIST_FORCING, experiment="historical",
-                         t_end=HIST_END, parent=None, pre_record="standalone"))
+                         t_end=HIST_END, parent=None, pre_record="standalone", record="ismip7"))
         for sc, t_end in BRANCHES.items():
             jobs.append(dict(name=f"{sc}_{g}", gcm=g, scenario=sc, experiment=sc, t_end=t_end,
-                             parent=f"historical_{g}", pre_record="standalone"))
+                             parent=f"historical_{g}", pre_record="standalone", record="ismip7"))
     jobs.append(dict(name="ocx_CARRA2", gcm="CARRA2", scenario="ocx", experiment="ocx", t_end=OCX_END,
-                     parent=None, pre_record="standalone"))
+                     parent=None, pre_record="standalone", record="standalone"))
     return jobs
 
 
@@ -113,7 +118,7 @@ def branch_copy(src: Path, dst: Path):
     print(f"  branched {src.name} -> {dst.name} ({n} frames hard-linked)")
 
 
-def provenance(cfg):
+def provenance(cfg, mode):
     import subprocess as sp
     commit = sp.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     dirty = bool(sp.run(["git", "-C", str(HERE), "status", "--porcelain", "--", "glacier_inverse", "forward_projection.py",
@@ -127,6 +132,7 @@ def provenance(cfg):
                              pin_front=str(getattr(oc, "pin_front", None)),
                              pin_front_filename=str(getattr(oc, "pin_front_filename", None))),
                 A_glen=float(cfg.A_glen), thermal=repr(getattr(cfg, "thermal", None)),
+                climate_mode=mode, calibration_climate=f"{cfg.gridded_filename} + yearly {cfg.yearly_climate_filename}",
                 git_commit=commit + ("+dirty" if dirty else ""))
 
 
@@ -135,7 +141,9 @@ def main():
     ap.add_argument("--root", default=None, help="run root (default: {config.output_dir}/ismip7_core)")
     ap.add_argument("--only", nargs="*", default=None, help="job names (their parents run too when unfinished)")
     ap.add_argument("--level", type=int, default=0)
-    ap.add_argument("--mode", default=None, choices=("raw", "anomaly"), help="climate mode (default: forward_projection's)")
+    ap.add_argument("--mode", default="anomaly", choices=("anomaly", "raw"),
+                    help="GCM climate mode: anomaly = the calibration's climatology + the GCM's departure (default); "
+                         "raw = the GCM fields + the calibrated biases (a sensitivity)")
     ap.add_argument("--no-elevation-feedback", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="print the plan and the commands, run nothing")
     ap.add_argument("--keep-going", action="store_true", help="after a failure, carry on with jobs that do not depend on it")
@@ -149,11 +157,11 @@ def main():
 
     cfg = load_config(HERE / DOMAIN)
     root = Path(a.root or Path(cfg.output_dir) / "ismip7_core")
-    prov = provenance(cfg)
+    prov = provenance(cfg, a.mode)
     man = root / "manifest.json"
     if man.exists():
         old = json.loads(man.read_text())
-        keys = ("results_subdir", "checkpoint", "calving", "A_glen", "thermal")
+        keys = ("results_subdir", "checkpoint", "calving", "A_glen", "thermal", "climate_mode", "calibration_climate")
         diff = [k for k in keys if old.get(k) != prov.get(k)]
         if diff and not a.force:
             sys.exit(f"{man} was written for another configuration ({', '.join(diff)} differ):\n"
@@ -165,7 +173,8 @@ def main():
             man.write_text(json.dumps(dict(prov, created=datetime.now().isoformat(timespec="seconds")), indent=1))
     print(f"ISMIP7 core runs in {root}\n  calibration {prov['results_subdir']} (git {prov['git_commit']}), "
           f"calving field {prov['calving']['rho_filename']}, alpha_h {prov['calving']['alpha_h']:g}, "
-          f"tau {prov['calving']['timescale']:g}\n  thermal {prov['thermal']}")
+          f"tau {prov['calving']['timescale']:g}\n  GCM climate mode {a.mode} on {prov['calibration_climate']}; "
+          f"OCX on the inversion's forcing\n  thermal {prov['thermal']}")
     if prov["calving"]["pin_front"] not in ("None", "") or prov["calving"]["pin_front_filename"] not in ("None", ""):
         print("  NOTE: the config carries a front pin; forward_projection refuses a pin, so the runs will fail")
 
@@ -190,9 +199,8 @@ def main():
                 + (f", branched from {j['parent']} at {HIST_END:g}" if j["parent"] else f", from t_start") + f": {status}")
         print(head)
         cmd = [PY, "forward_projection.py", "--gcm", j["gcm"], "--scenario", j["scenario"], "--level", str(a.level),
-               "--t-end", f"{j['t_end']:g}", "--out-dir", str(d), "--pre-record", j["pre_record"]]
-        if a.mode:
-            cmd += ["--mode", a.mode]
+               "--t-end", f"{j['t_end']:g}", "--out-dir", str(d), "--pre-record", j["pre_record"],
+               "--record", j["record"], "--mode", a.mode]
         if a.no_elevation_feedback:
             cmd += ["--no-elevation-feedback"]
         if j["parent"]:
