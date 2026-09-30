@@ -563,7 +563,18 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
                  thermal=(repr(thermal.cfg) if thermal is not None else "none (isothermal A_glen)"))
     if continue_run:
         attrs["continued_from"] = f"t={t_start:g} ({datetime.now().isoformat(timespec='seconds')}); velocity warm start reset"
-        snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, {"continued_from": attrs["continued_from"], "t_end": t_end}, append=True)
+        # the new segment's forcing replaces the old in the attrs (a branch --
+        # a scenario continued from a historical run -- must not carry the
+        # historical's scenario into its exports); the old one is noted
+        with xr.open_dataset(out_dir / "final_state.nc") as f0:
+            prev = dict(f0.attrs)
+        segment = {k: attrs[k] for k in ("gcm", "scenario", "climate", "climate_mode", "apply_biases", "ocean_forcing",
+                                         "elevation_feedback", "thermal", "t_end", "continued_from")}
+        if (str(prev.get("gcm")), str(prev.get("scenario"))) != (str(climate.gcm), str(climate.scenario)):
+            segment["branched_from"] = (f"{prev.get('gcm')} {prev.get('scenario')} at t={t_start:g} "
+                                        f"(climate: {prev.get('climate', '?')})")
+        attrs_continue = segment
+        snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, segment, append=True)
     else:
         snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, attrs)
     seq = build_step_sequence(t_start=t_start, t_end=t_end, dt_max=dt, dt_schedule=dt_schedule)
@@ -635,7 +646,7 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
         final["thermal_Q_geo"] = xr.DataArray(np.asarray(sd["Q_geo"]), dims=("y", "x"))
     if continue_run:
         old = {k: v for k, v in xr.open_dataset(out_dir / "final_state.nc").attrs.items()}
-        old.update(t_end=t_end, continued_from=attrs["continued_from"])
+        old.update(attrs_continue)
         attrs = old
     final.attrs.update(attrs)
     final.to_netcdf(out_dir / "final_state.nc.tmp")
