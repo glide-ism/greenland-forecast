@@ -1416,6 +1416,99 @@ near the margins at coarse levels is the blunter alternative.
      produces no 20th-century retreat; library change 22). More c resolution
      will not help; a calving law that can hold intermediate fronts or joint
      selection of neighbours would.
+   * THERMAL (v1.1thermal, 2026-09-30; sweep at 10 m spacing, its own
+     `stage1_reference`; `analysis/output/basin_mb_v1.1thermal_{free,gatefm,
+     iter}/`): the coupled stage 1 is -51 / -224 / -123 (SMB +20 over the
+     isothermal one, pbias; slow ice 1.27x vs 1.18x). Its free composite with
+     the s1m selection: -8 / -311 / -152 (1993-2019 -185), 2018 gates 0.92 of
+     Mankoff; excess vs its stage 1 doubled (2006-20: CW -29, NW -29, CE -19,
+     NE -13). Checked against the sweep's own states: Jakobshavn / Silarleq
+     are SELECTION errors (dhdt_int preferred +20 over the gate's +10; the
+     100x surface filter cut Silarleq's -10 at 117x), Rink / Sermeq Kujalleq
+     have NO c reproducing stage 1 (2x fast at any matching thickness),
+     79N / Upernavik N / Kakivfaat / Sermeq Avannarleq differ between sweep
+     and composite (neighbour coupling; 79N follows Zachariae's c in the shared
+     fjord), Academy / Ostenfeld / Petermann are out of reach at any c.
+     Gate terms alone (`_justflux`): -1 / -330 / -159, 2018 gates 1.13 of
+     stage 1 -- fixes Jakobshavn and Silarleq, but with no volume term every
+     too-fast front draws down further; and gate-less basins lose their
+     fit (the periphery fell back to the GLOBAL 0 instead of +65).
+   * ITERATIVE ALTERNATIVE, `calving_iter.py` (init / step / status /
+     finalize, one step per invocation; `forward_standalone.py --free-h0
+     FIELD --out-dir DIR` is the per-iteration run: pins cleared, the field
+     from any path via `RHO_PATH`, raw states at the stage-1 epochs). A
+     bracketed bisection per gated basin (stage-1 gate flux >= 0.5 Gt/yr) on
+     the flux-weighted gate THICKNESS log ratio vs stage 1, averaged over
+     1990 / 2008 / 2015 / 2018 -- strictly monotone in c at 101 of 101 basins
+     over the sweep (speed and flux are not: a thinning trunk speeds up, then
+     collapses); brackets from the sweep, every basin moves at once in the
+     composite (neighbours at their current values), jump / expand / reopen
+     rules, untracked basins keep the base field. Mechanically right (5
+     iterations: flux-weighted |s| 0.20 -> 0.09) and a FAILURE at basin
+     scale: 2006-20 -472 (iter 0) / -457 (iter 4) vs the sweep selection's
+     -311, 2018 gates 654 vs stage 1's 443, NO 3.5x and NE 2.6x of Mankoff.
+     The epoch MEAN cancels: fronts too thick and slow in 1990 (1.1-1.6x,
+     0.4-0.6x) and at thickness ~1 but 1.5-2.8x fast in 2015-18 read as
+     matched; the tongues (79N -91, Petermann -19 from the mean-signal
+     brackets vs the sweep's -130 / -100) keep gate thickness while running
+     6.9x / 5.7x. The minimum over epochs instead of the mean is also
+     monotone (89 single crossings) and moves the tongues back; a speed veto
+     (2x) breaks monotonicity at 8 basins. The per-epoch pattern is TIMING,
+     which one c cannot fix (c sets position, alpha_h the in-record response):
+     per-basin (c, alpha_h) from (1990 thickness, 1990 -> 2018 change) is the
+     well-posed extension, not built. DECISION (user, 2026-09-30): the sweep
+     selection is good enough for ISMIP7; projections run the ISOTHERMAL v1.1
+     calibration with `calving_h0_base_v1.1_s1m2.nc`, and OCX is submitted
+     FREE (the projections cannot be pinned; a pinned OCX evaluates another
+     model, and a pinned state handed to the free law unwinds -- the released
+     pin result).
+
+24. `ThermalConfig.couple_rheology` / `surface_T` (2026-09-30; defaults True /
+   "climatology" = library change 18): ONE-WAY thermal output for ISMIP7.
+   The user's reasoning: the coupling from temperature to rheology is too
+   uncertain to be useful (the fits do not distinguish coupled from uncoupled;
+   independent models' frozen / thawed bed maps disagree wildly), but the
+   model's temperature field is still worth submitting for Tb
+   intercomparisons. `couple_rheology=False`: `ThermalDriver` spins up and
+   steps the enthalpy model with the run's velocities, strain and basal
+   frictional heating, but never pushes B (glide `ThermalModel.
+   update_rheology=False`; one spin-up cycle) -- the dynamics are those of the
+   uncoupled model BIT FOR BIT (level-2 test: max |dH| 0, B the isothermal
+   40.95 everywhere; two-way control: |dH| up to 428 m). Strain heating uses
+   the flow's own drag and speeds, so it is consistent with the isothermal
+   dynamics. `surface_T="forcing"`: the Dirichlet surface temperature per step
+   is the annual mean of the air temperature the step's SMB saw, capped at
+   0 degC -- `forward_standalone.compute_smb` records it on
+   `ctx.forcing_T_annual` (the reanalysis years' anomaly / the index shift,
+   + tbias; the Hermite nodes average to the shift), `forward_projection`'s
+   compute_smb does the same with the ISMIP7 field + tbias + the elevation
+   feedback; `fs.thermal_spinup(ctx, t0, t1)` spins up on the FIRST step's
+   forcing (one extra SMB call) and `fs.thermal_surface_update` sets it per
+   step. The inverse's forward.simulate honours couple_rheology but keeps the
+   climatology surface. `forward_projection` now carries the thermal model
+   too: spin-up before a fresh run, one enthalpy step per dynamics step,
+   T_bed / T_mean / T_top in snapshots.nc and the VTI, the enthalpy state
+   (`thermal_E`, `thermal_E_surface`, `thermal_Q_geo`) in final_state.nc and
+   restored by `--continue` (refused when absent). Cost at 1 km: spin-up 18 s,
+   a few ms per step. `ismip_exporter.py` exports `litemptop` (T_top),
+   `litempavg` (T_mean), `litempbotgr` (T_bed), `litempbotfl`, `hfgeoubed`
+   (the config's uniform Q_geo) when the run's attrs carry a ThermalConfig and
+   its frames the T fields (else they stay in not_modelled.txt; `litemp` 3-D
+   always does), with the request's fill policies (no_ice / no_grounded_ice /
+   no_floating_ice / outside_domain) and an `ice_temperature` attribute that
+   states the coupling. `litempbotfl` is NOT the enthalpy model's basal node,
+   which is not held at the ocean interface under floating ice (251-264 K):
+   it is the in-situ seawater freezing point at the ice base (Jenkins 2011
+   liquidus, S 34.5 psu; 270.4-271.3 K). ISMIP7 checker on a 1 km ssp585 test
+   export: every naming / numerical / spatial / consistency / attribute test
+   passes (only the time window of the 3-yr test fails). Caveat: in
+   `CLIMATE_MODE="raw"` the surface temperature steps at the record start
+   (1850) from the CARRA2 climatology + index to raw dEBM2 tas + tbias, ~3.5 K
+   colder in the annual mean -- the SMB sees the same switch; `litemptop` and
+   the near-surface ice show it. Config for the ISMIP7 runs: `thermal=
+   ThermalConfig(nz=9, Q_geo=0.042, weighting="mean", thin_ice_isothermal=True,
+   couple_rheology=False, surface_T="forcing")` on the isothermal v1.1
+   calibration.
 
 Adjoint coverage (reviewed 2026-09-13): the flotation fields phi / xi / psi
 are frozen inputs to every glide stencil. The effective-pressure pathway is

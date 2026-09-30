@@ -526,7 +526,22 @@ class ThermalConfig:
     `thin_ice_isothermal` gives columns thinner than `h_thin` (and the
     ice-free cells) the isothermal B of A_glen instead of their cold
     surface-clamped value (up to 2x the interior's B); opt-in, the evidence
-    that it helps the 1 km solve was mixed (2026-09-27)."""
+    that it helps the 1 km solve was mixed (2026-09-27).
+
+    `couple_rheology=False` (2026-09-30) is ONE-WAY coupling: the enthalpy
+    model is spun up and stepped with the run's velocities, strain and
+    frictional heating, but B is never written -- the dynamics keep the
+    isothermal B of A_glen and are those of the uncoupled model (one spin-up
+    cycle suffices, the velocities do not change). The temperature field is
+    then a diagnostic of the uncoupled flow (the ISMIP litemp* output).
+    `surface_T="forcing"` (2026-09-30; "climatology" = the fixed field
+    above) takes the Dirichlet surface temperature per step from the SAME
+    air temperature the step's SMB saw (the drivers' compute_smb records its
+    annual mean on ctx.forcing_T_annual: the reanalysis year / the index
+    anomaly / the ISMIP7 field, + tbias, + the elevation feedback), capped
+    at 0 degC; the spin-up uses the first step's forcing. Implemented in
+    forward_standalone and forward_projection, not in the inverse's
+    forward.simulate (which keeps the climatology)."""
     nz: int = 9
     n_smooth: int = 60                 # max enthalpy sweeps per step
     Q_geo: float = 0.05                # W/m^2
@@ -547,6 +562,8 @@ class ThermalConfig:
     absolute_tolerance: float = 1e-6   # max |r|, scaled units; 1e-3 left the spin-up smoother-limited (0.2 K, 2 % in B)
     warm_start: bool = True            # start each spin-up from the previous run's E (same level)
     thin_ice_isothermal: bool = False  # B of A_glen where H < h_thin (see above)
+    couple_rheology: bool = True       # False: one-way, B stays isothermal (see above)
+    surface_T: str = "climatology"     # "climatology" | "forcing" (the step's SMB air temperature)
     report: bool = True
 
 

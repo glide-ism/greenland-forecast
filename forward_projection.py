@@ -320,6 +320,7 @@ def make_compute_smb(ctx: fs.Run, climate: Ismip7Climate, mode: str, feedback: O
         if dT_fb is not None:
             t2m = t2m + dT_fb
         g.temperature.t2m.set(t2m)
+        ctx.forcing_T_annual = t2m.mean(axis=0)       # the thermal surface under surface_T="forcing"
         g.precipitation.precip.set(precip)
         smb_model.forward(temp_deviations=temp_dev)
         smb = g.state.smb.data.mean(axis=0)
@@ -392,6 +393,7 @@ def scalars(ctx: fs.Run, t: float, dt: float, vol_prev: float, wall: float) -> d
 class SnapshotWriter:
     """(time, y, x) records on the run level, appended as the run goes."""
     FIELDS = ("H", "srf", "dhdt", "u_s", "v_s", "smb", "phi", "psi", "xi", "q", "h0", "tf_anom")
+    THERMAL_FIELDS = ("T_bed", "T_mean", "T_top")
 
     def __init__(self, path: Path, ctx: fs.Run, attrs: dict, append: bool = False):
         lvl, gd = ctx.lvl, ctx.gd
@@ -415,7 +417,8 @@ class SnapshotWriter:
         self.nc.createVariable("y", "f8", ("y",))[:] = yc
         self.nc.createVariable("x", "f8", ("x",))[:] = xc
         ch = (1, len(yc), len(xc))
-        for name in self.FIELDS:
+        self.ctx = ctx
+        for name in self.fields():
             self.nc.createVariable(name, "f4", ("time", "y", "x"), zlib=True, complevel=3, chunksizes=ch)
         for name, arr in (("bed", lvl.geometry.bed.data), ("beta", lvl.sliding.beta.data)):
             self.nc.createVariable(name, "f4", ("y", "x"), zlib=True, complevel=3)[:, :] = cp.asnumpy(arr)
@@ -430,13 +433,16 @@ class SnapshotWriter:
                 "v_s": 0.5 * (c.v_s.data[1:, :] + c.v_s.data[:-1, :]),
                 "smb": lvl.forcing.smb.data, "phi": lvl.state.phi.data, "psi": lvl.state.psi.data,
                 "xi": lvl.state.xi.data, "q": lvl.calving.q.data, "h0": lvl.calving.h0.data,
-                "tf_anom": c.tf_anom.data}
+                "tf_anom": c.tf_anom.data,
+                **({k: v for k, v in c.thermal.fields().items() if k in self.THERMAL_FIELDS}
+                   if getattr(c, "thermal", None) is not None else {})}
 
     def append(self, t: float):
         k = self.n
         self.nc["time"][k] = t
         for name, arr in self.fields().items():
-            self.nc[name][k, :, :] = cp.asnumpy(arr)
+            if name in self.nc.variables:            # a continued file may predate a field
+                self.nc[name][k, :, :] = cp.asnumpy(arr)
         self.nc.sync()
         self.n += 1
 
@@ -469,6 +475,13 @@ def resume_state(out_dir: Path, ctx: fs.Run, level: int, feedback: Optional["Ele
         raise SystemExit(f"--continue: final_state.nc grid {H.shape} != run level grid {ctx.lvl.state.H.data.shape}")
     ctx.mg.state.H.set(H, start_level=level)
     ctx.mg.state.H_prev.set(H, start_level=level)
+    if getattr(ctx, "thermal", None) is not None:
+        if "thermal_E" not in fin:
+            raise SystemExit("--continue: config.thermal is set but final_state.nc has no thermal state (thermal_E); "
+                             "the run was made without it")
+        ctx.thermal.load_state_dict({"E": fin.thermal_E.values, "E_surface": fin.thermal_E_surface.values,
+                                     "Q_geo": fin.thermal_Q_geo.values})
+        print("  thermal state restored from final_state.nc")
     # VTI: continue the numbering and the manifest
     w = ctx.vti_writer
     pvd = Path(w.out_dir) / f"{w.base}.pvd"
@@ -539,13 +552,15 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
             raise SystemExit(f"--continue: the run already reaches t={t_resume:g}; --t-end {t_end:g} adds nothing")
         t_start = t_resume
 
+    thermal = getattr(ctx, "thermal", None)
     attrs = dict(level=level, t_start=t_start, t_end=t_end, gcm=climate.gcm, scenario=climate.scenario,
                  climate_mode=mode, apply_biases=int(APPLY_BIASES), checkpoint=str(fs.CHECKPOINT),
                  pre_record=pre_record,
                  elevation_feedback=(feedback.describe() if feedback is not None else "off"),
                  crs_wkt=ctx.crs.to_wkt(), climate=climate.describe(),
                  ocean_forcing=(ctx.ocean.describe() if ctx.ocean is not None
-                                else f"constant margins q = {q0:g}, h0 = {h00:g} m"))
+                                else f"constant margins q = {q0:g}, h0 = {h00:g} m"),
+                 thermal=(repr(thermal.cfg) if thermal is not None else "none (isothermal A_glen)"))
     if continue_run:
         attrs["continued_from"] = f"t={t_start:g} ({datetime.now().isoformat(timespec='seconds')}); velocity warm start reset"
         snaps = SnapshotWriter(out_dir / "snapshots.nc", ctx, {"continued_from": attrs["continued_from"], "t_end": t_end}, append=True)
@@ -554,6 +569,10 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
     seq = build_step_sequence(t_start=t_start, t_end=t_end, dt_max=dt, dt_schedule=dt_schedule)
     ends = [t for t, _ in seq]
     steps = list(zip([t_start] + ends[:-1], ends))
+    if thermal is not None and not continue_run:
+        fs.thermal_spinup(ctx, *steps[0])
+        attrs.update(thermal_spinup=repr(thermal.spinup_info))
+        setattr(snaps.nc, "thermal_spinup", attrs["thermal_spinup"])
     print(f"{len(steps)} steps {t_start:g}-{t_end:g}: first {steps[0][1] - steps[0][0]:g} yr, "
           f"last {steps[-1][1] - steps[-1][0]:g} yr")
 
@@ -570,7 +589,12 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
             print(f"Solving forward problem at t={t_prev:.2f} with dt={dt_step:.2f}", flush=True)
             ctx.mg.forcing.smb.set(fs.restrict(ctx.compute_smb(t_prev, t_next), level), start_level=level)
             fs.ocean_forcing(t_prev, dt_step, ctx.mg, level, ctx)
+            if thermal is not None:
+                fs.thermal_surface_update(ctx)
+                thermal.pre_step(ctx.lvl.state.H.data)
             fs.dynamics_step(ctx, t_prev, dt_step)
+            if thermal is not None:
+                thermal.post_step(dt_step)
             ctx.update_derived(dt_step)
             row = scalars(ctx, t_next, dt_step, vol_prev, time.time() - tic)
             vol_prev = row["volume_km3"] * 1e9
@@ -601,6 +625,14 @@ def run(level: int, out_dir: Path, forcing_dir: Path, t_start: float, t_end: flo
                                                      ("beta", ctx.lvl.sliding.beta.data),
                                                      ("mask", ctx.lvl.state.mask.data)]:
         final[name] = xr.DataArray(cp.asnumpy(arr), dims=("y", "x"))
+    if thermal is not None:
+        # the restart state of the enthalpy model (--continue)
+        sd = thermal.state_dict()
+        E = np.asarray(sd["E"])
+        final["thermal_E"] = xr.DataArray(E, dims=("y", "x", "z_thermal")[:E.ndim] if E.shape[:2] == final.H.shape
+                                          else tuple(f"thermal_d{i}" for i in range(E.ndim)))
+        final["thermal_E_surface"] = xr.DataArray(np.asarray(sd["E_surface"]), dims=("y", "x"))
+        final["thermal_Q_geo"] = xr.DataArray(np.asarray(sd["Q_geo"]), dims=("y", "x"))
     if continue_run:
         old = {k: v for k, v in xr.open_dataset(out_dir / "final_state.nc").attrs.items()}
         old.update(t_end=t_end, continued_from=attrs["continued_from"])

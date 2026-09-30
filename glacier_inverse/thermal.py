@@ -51,8 +51,9 @@ class ThermalDriver:
         grid = model.mg.levels[level]
         self.grid = grid
         enh = None if float(cfg.enhancement) == 1.0 else cp.float32(cfg.enhancement)
+        self.coupled = bool(getattr(cfg, "couple_rheology", True))
         self.tm = ThermalModel(grid, nz=cfg.nz, n_smooth=cfg.n_smooth,
-                               update_rheology=True,
+                               update_rheology=self.coupled,
                                frictional_heating=cfg.frictional_heating,
                                strain_heating=cfg.strain_heating,
                                rho_i=float(rho_i), mg=model.mg, level=level,
@@ -76,6 +77,10 @@ class ThermalDriver:
     def set_surface(self, T_surface_fine):
         self.T_surface = _restrict(T_surface_fine, self.level)
         self.tm.set_surface_temperature(self.T_surface)
+
+    def _push(self):
+        if self.coupled:
+            self.tm.push_rheology()
 
     # ------------------------------------------------------------ spin-up
     def spinup(self, *, H0, momentum_solve, T_surface_fine):
@@ -101,12 +106,13 @@ class ThermalDriver:
             self.tm.ops.enthalpy_forcing.Q_geo.fill(cp.float32(cfg.Q_geo))
         else:
             self.tm.initialize(T_surface=self.T_surface, T_field=self.T_surface, Q_geo=cfg.Q_geo)
-        self.tm.push_rheology()        # B consistent with the starting E before the first solve
+        self._push()                   # B consistent with the starting E before the first solve
         thick = H0c > 100.0
         dt_sec = float(cfg.spinup_dt) * SECONDS_PER_YEAR
         steps = []
         with torch.no_grad():
-            for outer in range(int(cfg.spinup_outer)):
+            # one-way: the velocities never see the thermal B, one cycle is the equilibrium
+            for outer in range(int(cfg.spinup_outer) if self.coupled else 1):
                 momentum_solve()
                 mg.state.H.set(H0c, start_level=lvl)
                 mg.state.H_prev.set(H0c, start_level=lvl)
@@ -129,8 +135,8 @@ class ThermalDriver:
                     dT_prev = dT
                     if n >= int(cfg.spinup_min_steps) and (remaining < cfg.spinup_tol_K or dT == 0.0):
                         break
-                self.tm.update_rheology = True
-                self.tm.push_rheology()
+                self.tm.update_rheology = self.coupled
+                self._push()
                 steps.append((n, dT, Tb_prev))
         # Zero the velocities so the run starts as an isothermal one does. At
         # 1 km with 25-yr steps the first solve under the thermal B is on a
@@ -179,6 +185,7 @@ class ThermalDriver:
         T = self.tm.ops.get_temperature()
         w = self.tm.ops.get_water_content()
         return {**self.temperature_fields(),
+                "T_top": T[:, :, -1],
                 "omega_w_bed": w[:, :, 0],
                 "T_pmp_excess_bed": T[:, :, 0] - self._T_pmp_bed(),
                 "B": self.grid.rheology.B.data.copy()}
@@ -188,7 +195,12 @@ class ThermalDriver:
 
     def load_state_dict(self, d):
         self.tm.load_state_dict(d)
-        self.tm.push_rheology()
+        self._push()
+
+
+def surface_temperature_annual(t_annual) -> cp.ndarray:
+    """An annual-mean air temperature (degC, biases already in) capped at 0 degC, in K."""
+    return cp.minimum(cp.asarray(t_annual, dtype=cp.float32), 0.0) + cp.float32(T0)
 
 
 def time_elapsed(tic):

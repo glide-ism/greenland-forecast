@@ -90,7 +90,7 @@ STATE_SAVE_TIMES = ()             # step ends at which the raw state is saved to
                                   # (a restart point; the observation epochs for a sweep evaluation)
 VTI_PRECISION = {"H": 0.01, "srf": 0.01, "dhdt": 1e-3, "smb": 1e-3, "U": 0.01, "U_s": 0.01, "U_b": 0.01,
                  "q": 1e-4, "h0": 0.01, "tf_anom": 1e-3, "xi": 1e-4, "phi": 1e-4, "psi": 1e-4,
-                 "bed": 0.01, "beta": 1e-3, "T_bed": 0.01, "T_mean": 0.01, "omega_w_bed": 1e-5}
+                 "bed": 0.01, "beta": 1e-3, "T_bed": 0.01, "T_mean": 0.01, "T_top": 0.01, "omega_w_bed": 1e-5}
 VTI_MASKED_FIELDS = ("U", "U_s", "U_b", "smb", "dhdt")
 # --- ocean forcing: None -> config.ocean_forcing, or an override such as
 # dataclasses.replace(config.ocean_forcing, alpha_q=0.0, alpha_h=50.0)
@@ -111,6 +111,7 @@ Q0 = config.calving_q if Q0 is None else float(Q0)
 H00 = config.calving_h0 if H00 is None else float(H00)
 OCEAN = config.ocean_forcing if OCEAN is None else OCEAN
 THERMAL_PATH = Path(config.base_dir) / "model_inputs" / OCEAN.filename
+RHO_PATH = None                   # the h0_base / rho file; None = model_inputs/<OCEAN.rho_filename>
 
 
 # ----------------------------------------------------------- one-time export
@@ -223,7 +224,7 @@ def load_ocean_forcing() -> Optional[OceanForcing]:
         print(f"no thermal forcing at {THERMAL_PATH}: constant margins q = {Q0:g}, h0 = {H00:g} m")
         return None
     of = OceanForcing.from_file(THERMAL_PATH, 2 ** config.n_levels, OCEAN, q0=Q0, h00=H00,
-                               freeze_anomaly=getattr(config, "climatology_only", False))
+                               freeze_anomaly=getattr(config, "climatology_only", False), rho_path=RHO_PATH)
     print(of.describe())
     return of
 
@@ -429,12 +430,16 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
         smb_model.forward(temp_deviations=temp_dev)
         return g.state.smb.data.mean(axis=0)
 
-    def smb_year(year: int) -> cp.ndarray:
-        # the reanalysis year + the calibrated biases (forward.YearField)
-        g.temperature.t2m.set(t2m + cp.asarray(yearly.t2m_anomaly(year)) + tbias)
+    t2m_annual = t2m.mean(axis=0)
+
+    def smb_year(year: int):
+        # the reanalysis year + the calibrated biases (forward.YearField);
+        # also returns the year's annual-mean temperature anomaly
+        anom = cp.asarray(yearly.t2m_anomaly(year))
+        g.temperature.t2m.set(t2m + anom + tbias)
         g.precipitation.precip.set(precip * cp.asarray(yearly.precip_ratio(year)))
         smb_model.forward(temp_deviations=temp_dev)
-        return g.state.smb.data.mean(axis=0)
+        return g.state.smb.data.mean(axis=0), (anom.mean(axis=0) if anom.ndim == 3 else anom)
 
     def compute_smb(t_prev: float, t_next: float) -> cp.ndarray:
         """Annual-mean SMB on the fine grid for the step (t_prev, t_next],
@@ -446,8 +451,13 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
         on_record = [(y, w) for y, w in weights if yearly is not None and yearly.has(y)]
         index = [(y, w) for y, w in weights if not (yearly is not None and yearly.has(y))]
         smb = cp.zeros_like(t2m[0])
+        # the step's annual-mean forcing air temperature (degC, + tbias), the
+        # thermal model's surface temperature under ThermalConfig.surface_T="forcing"
+        T_ann = cp.zeros_like(t2m[0])
         for y, w in on_record:
-            smb += w * smb_year(y)
+            smb_y, anom_y = smb_year(y)
+            smb += w * smb_y
+            T_ann += w * (t2m_annual + anom_y + tbias)
         if index:
             w_index = sum(w for _, w in index)
             a = sum(w * t_anom[min(y, year_max)] for y, w in index) / w_index
@@ -462,6 +472,8 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
             # carries no spread of its own and takes the full sigma.
             for xi, wi in zip(*nodes):
                 smb += w_index * wi * smb_index(shift + xi + tbias, mult)
+            T_ann += w_index * (t2m_annual + (shift + tbias))    # the quadrature nodes average to the shift
+        ctx.forcing_T_annual = T_ann
         smb[~domain_mask] = -10.0
         return smb
 
@@ -538,6 +550,7 @@ def setup(level: int = None, out_dir=None, ocean_loader=None) -> Run:
                                             "q": lvl.calving.q, "h0": lvl.calving.h0, "tf_anom": tf_anom,
                                             **({"T_bed": lambda: ctx.thermal.fields()["T_bed"],
                                                 "T_mean": lambda: ctx.thermal.fields()["T_mean"],
+                                                "T_top": lambda: ctx.thermal.fields()["T_top"],
                                                 "omega_w_bed": lambda: ctx.thermal.fields()["omega_w_bed"],
                                                 "B": lvl.rheology.B} if ctx.thermal is not None else {})}.items()
                                            if VTI_FIELDS is None or k in VTI_FIELDS})
@@ -563,6 +576,43 @@ def dynamics_step(ctx: Run, t_prev: float, dt_step: float) -> None:
         for f in (mg.state.u, mg.state.v, mg.state.ud, mg.state.vd):
             f.set(0.0, start_level=level)
     ctx.model.forward(cp.float32(t_prev), cp.float32(dt_step), update_geometry=False)
+
+
+def thermal_surface(ctx: Run) -> cp.ndarray:
+    """The thermal model's surface temperature (fine grid, K) under
+    ThermalConfig.surface_T: the fixed climatology field, or the annual mean
+    of the air temperature the last compute_smb call forced the SMB with
+    (tbias removed again when surface_T_tbias is False), capped at 0 degC."""
+    from glacier_inverse.thermal import surface_temperature_annual
+    tcfg = ctx.thermal.cfg
+    if getattr(tcfg, "surface_T", "climatology") == "climatology":
+        return ctx.thermal_T_surface
+    T = ctx.forcing_T_annual
+    if not tcfg.surface_T_tbias:
+        T = T - ctx.tbias
+    return surface_temperature_annual(T)
+
+
+def thermal_surface_update(ctx: Run) -> None:
+    if getattr(ctx.thermal.cfg, "surface_T", "climatology") == "forcing":
+        ctx.thermal.set_surface(thermal_surface(ctx))
+
+
+def thermal_spinup(ctx: Run, t0: float, t1: float) -> None:
+    """The thermal spin-up on the initial state (ThermalDriver.spinup), with
+    the surface temperature of the first step (t0, t1] under
+    surface_T="forcing" (one extra SMB evaluation, discarded)."""
+    lvl, mg, level = ctx.lvl, ctx.mg, ctx.level
+    H0 = lvl.state.H.data.copy()
+    if getattr(ctx.thermal.cfg, "surface_T", "climatology") == "forcing":
+        ctx.compute_smb(t0, t1)
+
+    def _momentum_solve():
+        mg.forcing.smb.set(0.0, start_level=level)
+        lvl.state.H.data[:] = H0
+        dynamics_step(ctx, float(t0), float(ctx.thermal.cfg.spinup_momentum_dt))
+    ctx.thermal.spinup(H0=H0, momentum_solve=_momentum_solve, T_surface_fine=thermal_surface(ctx))
+    lvl.state.H.data[:] = H0
 
 
 def save_state(ctx: Run, t: float) -> Path:
@@ -609,20 +659,14 @@ def run(ctx: Run) -> None:
     ends = [t for t, _ in seq]
     steps = list(zip([float(T_START)] + ends[:-1], ends))
     if ctx.thermal is not None:
-        H0 = lvl.state.H.data.copy()
-
-        def _momentum_solve():
-            mg.forcing.smb.set(0.0, start_level=level)
-            lvl.state.H.data[:] = H0
-            dynamics_step(ctx, float(T_START), float(ctx.thermal.cfg.spinup_momentum_dt))
-        ctx.thermal.spinup(H0=H0, momentum_solve=_momentum_solve, T_surface_fine=ctx.thermal_T_surface)
-        lvl.state.H.data[:] = H0
+        thermal_spinup(ctx, *steps[0])
     for t_prev, t_next in steps:
         dt_step = t_next - t_prev
         print(f"Solving forward problem at t={t_prev:.2f} with dt={dt_step:.2f}", flush=True)
         mg.forcing.smb.set(restrict(ctx.compute_smb(t_prev, t_next), level), start_level=level)
         ocean_forcing(t_prev, dt_step, mg, level, ctx)
         if ctx.thermal is not None:
+            thermal_surface_update(ctx)
             ctx.thermal.pre_step(lvl.state.H.data)
         dynamics_step(ctx, t_prev, dt_step)
         if ctx.thermal is not None:
@@ -706,6 +750,23 @@ def configure_stage1(pin: Optional[str] = None, vti_from: float = 1980.0) -> Pat
     return OUT_DIR
 
 
+def configure_free(h0_field: str, out_dir: str, vti_from: float = 1980.0) -> Path:
+    """Set the module up for a FREE-calving run of a given h0_base field (the
+    calving_iter.py step): the config's ocean forcing with every pin and the
+    release cleared and `h0_field` (any path) as the margin field; raw states
+    at STAGE1_STATE_TIMES; frames from `vti_from`; into `out_dir`."""
+    global OCEAN, OUT_DIR, STATE_SAVE_TIMES, VTI_T_MIN, SNAP_TIMES, RHO_PATH
+    RHO_PATH = Path(h0_field).resolve()
+    OCEAN = dataclasses.replace(config.ocean_forcing, enabled=True, pin_front=None, pin_front_filename=None,
+                                pin_release_year=None, rho_filename=RHO_PATH.name)
+    OUT_DIR = Path(out_dir)
+    STATE_SAVE_TIMES = tuple(sorted(set(tuple(STATE_SAVE_TIMES) + STAGE1_STATE_TIMES)))
+    SNAP_TIMES = tuple(sorted(set(tuple(SNAP_TIMES) + STATE_SAVE_TIMES)))
+    VTI_T_MIN = float(vti_from)
+    print(f"FREE-CALVING RUN of {RHO_PATH}: states at {list(STATE_SAVE_TIMES)}, frames from {VTI_T_MIN:g}, into {OUT_DIR}")
+    return OUT_DIR
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--export", action="store_true", help="only (re)write physical_fields.nc")
@@ -713,7 +774,17 @@ if __name__ == "__main__":
                     help="the stage-1 reference replay: pinned front, raw states at the observation epochs, "
                          "into {output_dir}/stage1_reference (the reference of sweep_calving_eval.py --reference-run)")
     ap.add_argument("--pin", default=None, help="with --stage1: the yearly front-mask file (default: the config's, else front_mask_lia.nc)")
+    ap.add_argument("--free-h0", default=None,
+                    help="a free-calving run of this h0_base field (any path; pins cleared), raw states at the observation "
+                         "epochs, into --out-dir (calving_iter.py prints the command)")
+    ap.add_argument("--out-dir", default=None, help="with --free-h0: the output directory")
     args = ap.parse_args()
+    if args.stage1 and args.free_h0:
+        ap.error("--stage1 and --free-h0 are exclusive")
     if args.stage1:
         configure_stage1(args.pin)
+    if args.free_h0:
+        if not args.out_dir:
+            ap.error("--free-h0 needs --out-dir")
+        configure_free(args.free_h0, args.out_dir)
     main(export_only=args.export)

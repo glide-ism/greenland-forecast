@@ -133,6 +133,18 @@ GRID_VARS = {
     "lifmassbf": ("FL", "Ice front melt flux", "land_ice_specific_mass_flux_due_to_ice_front_melting", "kg m-2 s-1"),
     "ligroundf": ("FL", "Grounding line flux", "land_ice_specific_mass_flux_at_grounding_line", "kg m-2 s-1"),
 }
+# exported only when the run carries the enthalpy model's fields (config.thermal;
+# frames with T_bed / T_mean / T_top); otherwise listed in not_modelled.txt
+THERMAL_VARS = {
+    "litemptop": ("ST", "Surface temperature", "temperature_at_top_of_ice_sheet_model", "K"),
+    "litempavg": ("ST", "Depth average temperature", "land_ice_temperature", "K"),
+    "litempbotgr": ("ST", "Basal temperature beneath grounded ice sheet", "temperature_at_base_of_ice_sheet_model", "K"),
+    "litempbotfl": ("ST", "Basal temperature beneath floating ice shelf", "temperature_at_base_of_ice_sheet_model", "K"),
+    "hfgeoubed": ("FL", "Geothermal heat flux", "upward_geothermal_heat_flux_in_land_ice", "W m-2"),
+}
+THERMAL_FRAME_FIELDS = ["T_bed", "T_mean", "T_top"]
+SEA_SALINITY = 34.5                                    # psu, litempbotfl
+FREEZE_L1, FREEZE_L2, FREEZE_L3 = -5.73e-2, 8.32e-2, -7.53e-4   # K/psu, K, K/m (Jenkins 2011)
 SCALAR_VARS = {
     "lim": ("ST", "Total ice mass", "land_ice_mass", "kg"),
     "limnsw": ("ST", "Mass above floatation", "land_ice_mass_not_displacing_sea_water", "kg"),
@@ -309,7 +321,8 @@ class IsmipGrid:
 
 # ------------------------------------------------------------------- physics
 class Physics:
-    def __init__(self, cfg, bed, beta, dx):
+    def __init__(self, cfg, bed, beta, dx, Q_geo=None):
+        self.Q_geo = Q_geo                  # W m-2, uniform; None = no thermal output
         self.rho_i, self.rho_w, self.g = float(cfg.rho_ice), float(cfg.rho_water), float(cfg.gravity)
         self.m, self.u_reg, self.water_drag = float(cfg.sliding_m), float(cfg.u_reg), float(cfg.water_drag)
         self.tau_c = float(cfg.calving_timescale)
@@ -373,6 +386,23 @@ class Physics:
             "licalvf": (calv, None, 0.0),
             "ligroundf": (gl, None, 0.0),
         }
+        if self.Q_geo is not None and "T_bed" in fr:
+            # the enthalpy model's temperatures (K) on the ice, by the request's
+            # fill policies: no_ice / no_grounded_ice / no_floating_ice; the
+            # geothermal flux is an outside_domain field like topg
+            Tb = fr["T_bed"].astype("float64")
+            # Under floating ice the enthalpy model's basal node is not held at
+            # the ocean interface (251-264 K where it should be ~271 K), so the
+            # floating basal temperature is the in-situ freezing point of
+            # seawater at the ice base (Jenkins 2011 liquidus, salinity
+            # SEA_SALINITY): T_f = 273.15 + l1 S + l2 + l3 depth.
+            T_f = 273.15 + FREEZE_L1 * SEA_SALINITY + FREEZE_L2 + FREEZE_L3 * np.maximum(-base, 0.0)
+            out.update({
+                "litemptop": (fr["T_top"].astype("float64"), icef, np.nan),
+                "litempavg": (fr["T_mean"].astype("float64"), icef, np.nan),
+                "litempbotgr": (Tb, grf, np.nan), "litempbotfl": (T_f, flf, np.nan),
+                "hfgeoubed": (np.full_like(H, float(self.Q_geo)), domf, np.nan),
+            })
         frac = {"sftgif": icef, "sftgrf": (phi * ice).astype(np.float32), "sftflf": ((1.0 - phi) * ice).astype(np.float32)}
         A = self.dx ** 2
         scal = {
@@ -508,7 +538,6 @@ def main():
 
     st = src.static()
     grid = IsmipGrid(DOMAIN, cfg.n_levels, st["bed"].shape, a.resolution)
-    phys = Physics(cfg, st["bed"], st["beta"], grid.dx)
 
     meta = {}
     for fn in ("snapshots.nc", "forward_soln.nc", "final_state.nc"):
@@ -516,6 +545,24 @@ def main():
             with xr.open_dataset(run_dir / fn) as s:
                 meta = {k: str(v) for k, v in s.attrs.items() if k != "crs_wkt"}
             break
+    # thermal output: the run's ThermalConfig (attrs) and the fields in its frames
+    thermal_cfg = meta.get("thermal", "")
+    Q_geo = None
+    if thermal_cfg.startswith("ThermalConfig"):
+        m = re.search(r"Q_geo=([-+0-9.eE]+)", thermal_cfg)
+        try:
+            src.get(src.times[-1], THERMAL_FRAME_FIELDS)
+            Q_geo = float(m.group(1)) if m else None
+        except Exception as e:                      # frames written without the thermal fields
+            print(f"WARNING: the run has {thermal_cfg[:40]}... but its frames lack {THERMAL_FRAME_FIELDS} ({e}); "
+                  f"temperatures not exported")
+    thermal_on = Q_geo is not None
+    one_way = thermal_on and "couple_rheology=False" in thermal_cfg
+    grid_vars = dict(GRID_VARS, **(THERMAL_VARS if thermal_on else {}))
+    not_modelled = {k: v for k, v in NOT_MODELLED.items() if not (thermal_on and k in THERMAL_VARS)}
+    if thermal_on:
+        not_modelled["litemp"] = "the 3-D enthalpy field is not written to the yearly frames"
+    phys = Physics(cfg, st["bed"], st["beta"], grid.dx, Q_geo=Q_geo)
     attrs = {
         "Conventions": "CF-1.7", "ismip7_version": "7.0", "institution": "University of Montana",
         "source": f"GLIDE ice sheet model (MOLHO), enthalpy SMB model, forced by {a.esm}",
@@ -531,9 +578,19 @@ def main():
         "run_dir": str(run_dir.resolve()),
         "history": f"Generated {datetime.now(timezone.utc).isoformat()} by ismip_exporter.py",
     }
-    for k in ("climate_mode", "climate", "ocean_forcing", "elevation_feedback", "checkpoint"):
+    for k in ("climate_mode", "climate", "ocean_forcing", "elevation_feedback", "checkpoint", "thermal"):
         if k in meta:
             attrs[f"run_{k}"] = meta[k]
+    if thermal_on:
+        attrs["ice_temperature"] = (
+            ("ONE-WAY coupled: the enthalpy model (glide, Aschwanden) is advected and heated (strain, basal friction) "
+             "by the model's velocities, but the rheology stays isothermal (A_glen); the temperatures are a diagnostic "
+             "of the uncoupled flow. " if one_way else
+             "Thermomechanically coupled: B from the enthalpy model (Paterson-Budd, depth-collapsed). ")
+            + f"Uniform geothermal flux {Q_geo:g} W m-2; surface temperature = annual-mean forcing air temperature "
+              f"capped at 0 degC (or the calibration climatology, see run_thermal: surface_T). litempbotfl is the "
+              f"in-situ seawater freezing point at the ice base (S = {SEA_SALINITY:g} psu, Jenkins 2011), not the "
+              f"enthalpy model's basal node.")
 
     root = Path(a.submission_dir) if a.submission_dir else run_dir.parent / "ISMIP7_submission"
     out_dir = root / "Models" / REGION / a.group / MODEL / "CORE" / a.set_counter
@@ -544,18 +601,18 @@ def main():
                                  f"{a.experiment}_{config_id}_{period}.nc")
     with open(out_dir / "not_modelled.txt", "w") as f:
         f.write("# ISMIP7: non-mandatory variables this model does not represent (read by the compliance checker)\n")
-        for v, why in NOT_MODELLED.items():
+        for v, why in not_modelled.items():
             f.write(f"{v:14s} # {why}\n")
-    want = set(a.variables) if a.variables else set(GRID_VARS) | set(SCALAR_VARS)
-    unknown = want - set(GRID_VARS) - set(SCALAR_VARS)
+    want = set(a.variables) if a.variables else set(grid_vars) | set(SCALAR_VARS)
+    unknown = want - set(grid_vars) - set(SCALAR_VARS)
     if unknown:
         raise SystemExit(f"unknown variables {sorted(unknown)}")
-    writers = {v: Writer(fname(v), v, GRID_VARS[v], years, attrs, grid) for v in GRID_VARS if v in want}
+    writers = {v: Writer(fname(v), v, grid_vars[v], years, attrs, grid) for v in grid_vars if v in want}
     writers.update({v: Writer(fname(v), v, SCALAR_VARS[v], years, attrs) for v in SCALAR_VARS if v in want})
     print(f"{a.experiment} (set {config_id}) {period}: {len(years)} years, {len(writers)} variables, "
           f"{a.resolution:g} m grid {len(grid.y)} x {len(grid.x)} from {src.kind} -> {out_dir}")
 
-    names = ["H", "smb", "dhdt", "mask", "phi", "psi", "xi", "U", "U_s", "U_b"]
+    names = ["H", "smb", "dhdt", "mask", "phi", "psi", "xi", "U", "U_s", "U_b"] + (THERMAL_FRAME_FIELDS if thermal_on else [])
     try:
         for k, y in enumerate(years):
             out, frac, scal = phys.fields(src.get(y + 1.0, names))
