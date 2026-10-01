@@ -58,6 +58,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from glacier_inverse import load_config  # noqa: E402
+sys.path.insert(0, str(HERE / "tools"))
+from ismip7_set_counters import counter_for  # noqa: E402  (the per-experiment set counters)
 
 PY = sys.executable
 DOMAIN = "domains/greenland"
@@ -151,7 +153,9 @@ def main():
     ap.add_argument("--export", action="store_true", help="export each finished run (ismip_exporter.py)")
     ap.add_argument("--export-only", action="store_true", help="export the finished runs, run nothing")
     ap.add_argument("--resolution", type=float, default=1000.0)
-    ap.add_argument("--set-counter", default="C001")
+    ap.add_argument("--set-counter", default=None,
+                    help="force one set counter for every export (default: the protocol's per-experiment table, "
+                         "tools/ismip7_set_counters.py: C001 historical CESM ... C011 OCX)")
     ap.add_argument("--submission-dir", default=None, help="default: {root}/ISMIP7_submission")
     a = ap.parse_args()
 
@@ -240,7 +244,7 @@ def main():
                     continue
         if (a.export or a.export_only) and finished(d, j["t_end"]):
             ecmd = [PY, "ismip_exporter.py", "--run-dir", str(d), "--experiment", j["experiment"],
-                    "--esm", j["gcm"], "--resolution", f"{a.resolution:g}", "--set-counter", a.set_counter,
+                    "--esm", j["gcm"], "--resolution", f"{a.resolution:g}", "--set-counter", a.set_counter or counter_for(j["experiment"], j["gcm"]),
                     "--submission-dir", str(Path(a.submission_dir) if a.submission_dir else root / "ISMIP7_submission")]
             if j["experiment"] == "ocx":       # not in the exporter's / checker's experiment table
                 ecmd += ["--years", "1986", "2025"]
