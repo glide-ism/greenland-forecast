@@ -46,8 +46,11 @@ script (written against glide's example zarr and the pre-2026-09 model):
     the split ISMIP7 asks for does not exist here.
   * ligroundf is the upwinded H u flux through faces between grounded ice
     and floating ice or open water (bed < 0), charged to the grounded cell.
-  * strbasemag follows stress.cu: rho_i g (beta xi^p (|u_b|^2 + u_reg)^((m-1)/2)
-    + water_drag) |u_b| with the BASAL velocity (MOLHO: u_b = u - u_d), the
+  * strbasemag follows stress.cu: rho_i g (beta xi^p K + water_drag) |u_b|,
+    K = (|u_b|^2 + u_reg)^((m-1)/2) (u0 / (|u_b| + u0))^m (the regularized
+    Coulomb factor, config.sliding_u0; added 2026-10-01 -- the exports before
+    omitted it and overstated fast-ice drag, x2.2 at 3 km/yr for u0 300,
+    m 1/3), with the BASAL velocity (MOLHO: u_b = u - u_d), the
     per-year flotation fraction xi (effective pressure) and the beta the run
     actually used (capped at BETA_MAX) -- not the mean velocity, phi of the
     first frame and the uncapped beta.
@@ -95,9 +98,9 @@ GROUP, MODEL, REGION = "UMT", "GLIDE", "GrIS"        # file-name fields 3 and 4;
 ISM_MEMBER, FORCING_ID = "m001", "f001"
 # nominal year windows of experiments_ismip7.csv (the checker's): historical
 # starts anywhere in 1850-2014 (the run's first yearly frame here), the
-# projections are pinned to 2015-end. The SET COUNTER (C001, E003, P012 ...)
-# in the file name identifies a parameter set, not an experiment: all core
-# experiments of one configuration share it and sit in one directory
+# projections are pinned to 2015-end. The SET COUNTER (C001 ... C011) is one
+# per (experiment, ESM) in the ISMIP7 protocol table (tools/ismip7_set_counters.py
+# holds it; run_ismip7_core.py passes it), each in its own directory
 # Models/GrIS/<group>/<model>/CORE/<set>/ (the checker's --source-path).
 EXPERIMENTS = {"historical": (1850, 2014), "ssp370": (2015, 2100), "ssp126": (2015, 2300),
                "ssp585": (2015, 2300), "ctrl": (2015, 2300)}
@@ -325,6 +328,7 @@ class Physics:
         self.Q_geo = Q_geo                  # W m-2, uniform; None = no thermal output
         self.rho_i, self.rho_w, self.g = float(cfg.rho_ice), float(cfg.rho_water), float(cfg.gravity)
         self.m, self.u_reg, self.water_drag = float(cfg.sliding_m), float(cfg.u_reg), float(cfg.water_drag)
+        self.u0 = float(getattr(cfg, "sliding_u0", 0.0) or 0.0)       # regularized Coulomb transition (m/yr)
         self.tau_c = float(cfg.calving_timescale)
         self.sigmoid_c = float(cfg.sigmoid_c)
         self.bed, self.beta, self.dx = bed.astype("float64"), beta.astype("float64"), float(dx)
@@ -363,8 +367,15 @@ class Physics:
         us, vs = fr["U_s"][..., 0].astype("float64"), fr["U_s"][..., 1].astype("float64")
         ub, vb = fr["U_b"][..., 0].astype("float64"), fr["U_b"][..., 1].astype("float64")
         ub2 = ub ** 2 + vb ** 2
-        tau_b = ri * self.g * (self.beta * np.where(xi > 0, xi ** SLIDING_P, 0.0) * (ub2 + self.u_reg) ** ((self.m - 1.0) / 2.0)
-                               + self.water_drag) * np.sqrt(ub2)
+        # glide stress.cu: tau_b / (rho_i g) = (beta xi^p K(S) + water_drag) |u_b|, S = |u_b|^2 + u_reg,
+        # K = S^((m-1)/2) (u0 / (sqrt(S) + u0))^m (drag_speed_factor; the Coulomb factor only when
+        # u0 > 0). xi is glide's state.xi: the flotation fraction, times (H + N_floor_H) / N_scale_H
+        # under the dimensional effective pressure (compute_flotation_fraction), as stored in the frame.
+        S = ub2 + self.u_reg
+        K = S ** ((self.m - 1.0) / 2.0)
+        if self.u0 > 0.0:
+            K = K * (self.u0 / (np.sqrt(S) + self.u0)) ** self.m
+        tau_b = ri * self.g * (self.beta * np.where(xi > 0, xi ** SLIDING_P, 0.0) * K + self.water_drag) * np.sqrt(ub2)
         # licalvf / lifmassbf are non-positive in the request (loss); ligroundf
         # is the flux OF grounded ice across the grounding line, positive
         calv = LOSS_SIGN * ri * (1.0 - psi) * Hi / self.tau_c / spy                  # kg m-2 s-1
@@ -499,7 +510,7 @@ def main():
                     help="first and last model year (default: the core experiment's window, clipped to the run)")
     ap.add_argument("--resolution", type=float, default=1000.0, help="output grid spacing (m): 1000, 2000, 4000, 8000, 16000")
     ap.add_argument("--group", default=GROUP, help="group id in the file name (field 3)")
-    ap.add_argument("--set-counter", default="C001", help="parameter-set id (C/E/P + 3 digits), shared by the core experiments")
+    ap.add_argument("--set-counter", default="C001", help="set counter (C/E/P + 3 digits), one per experiment and ESM (tools/ismip7_set_counters.py)")
     ap.add_argument("--submission-dir", default=None,
                     help="root of the submission tree; files go to <root>/Models/GrIS/<group>/<model>/CORE/<set>/ "
                          "(default: <run-dir>/../ISMIP7_submission)")
