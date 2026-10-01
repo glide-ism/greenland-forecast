@@ -2836,9 +2836,15 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   acabf down to -6.6e-4 kg m-2 s-1 (-22.7 m ice/yr) at x -211..-202,
   y -3091..-3089 km in ssp585 2154-2165: thin near-sea-level ice in the
   warmest, rain-shadowed corner of Greenland melting out under the elevation
-  feedback (user: expected there). The full 11-experiment check was started
-  2026-09-30 (`ismip7_core/logs/checker_full.log`, report in the C001
-  directory). Disk: the 11 runs take 330 GB (1 km yearly LZ4 VTI ~77 MB per
+  feedback (user: expected there). FULL CHECK (all 11, 96 min): 360 files of
+  the 10 core experiments, 0 errors, 21 warnings of the same four kinds
+  (strbasemag in every experiment, topg in historical / ssp126, acabf and
+  xvel* in ssp585 only -- up to 0.00086 m/s, 28 values); the single ERROR is
+  that the checker's table has no `ocx` experiment, so the OCX files are not
+  checked (report: C001/compliance_checker_log.txt). Transfer: Globus from
+  campus (Starlink upload 12 Mbps = ~31 h for 167 GB); lossless repacking
+  gains 1-3 % (shuffle is already on), GranularBitRound at 4 / 3 significant
+  digits would give x1.7 / x2.2 if ISMIP7 accepts quantization (not used). Disk: the 11 runs take 330 GB (1 km yearly LZ4 VTI ~77 MB per
   frame); the root filesystem filled during this work.
 
 ## Known gaps / follow-ups
