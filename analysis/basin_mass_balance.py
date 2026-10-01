@@ -163,9 +163,14 @@ def _vti_arrays(path, names):
     return read_vti(path, names)
 
 
-def frames_vti(run_dir):
+def _in(t, t_read):
+    return t_read is None or t_read[0] - 1e-6 <= t <= t_read[1] + 1e-6
+
+
+def frames_vti(run_dir, t_read=None):
     """Yield (time, H, smb, (u_s, v_s)) for a forward_standalone run, the
-    initial state first (with smb and velocity None)."""
+    initial state first (with smb and velocity None); with `t_read` = (t0, t1)
+    only the frames inside it are read."""
     run_dir = Path(run_dir)
     pvd = next((run_dir / 'vti').glob('*.pvd'))
     items = re.findall(r'timestep="([\d.]+)"[^>]*file="([^"]+)"', pvd.read_text())
@@ -173,10 +178,13 @@ def frames_vti(run_dir):
     attrs = xr.open_dataset(meta).attrs if meta else {}
     t0 = float(attrs.get('t_start', np.nan))
     phys = run_dir.parent / 'physical_fields.nc'
-    if np.isfinite(t0) and phys.exists() and int(attrs.get('level', 0)) == 0 and float(items[0][0]) > t0:
+    if (np.isfinite(t0) and phys.exists() and int(attrs.get('level', 0)) == 0 and float(items[0][0]) > t0
+            and _in(t0, t_read)):
         H0 = crop_to_factor(xr.open_dataset(phys), 2 ** N_LEVELS).H_init.values
         yield t0, H0, None, None
     for t, fn in items:
+        if not _in(float(t), t_read):
+            continue
         a = _vti_arrays(pvd.parent / fn, ['H', 'smb', 'U_s'])
         yield float(t), a['H'], a['smb'], (a['U_s'][..., 0], a['U_s'][..., 1])
 
@@ -206,7 +214,7 @@ def frames_series_nc(run_dir):
     nc.close()
 
 
-def model_series(run_dir, masks, dx, prefer='auto', gates=None):
+def model_series(run_dir, masks, dx, prefer='auto', gates=None, t_read=None):
     """`prefer`: 'auto' takes the finest source available (series.nc, then
     yearly VTI, then snapshots); 'snapshots' forces snapshots.nc, which for a
     projection is every SNAPSHOT_EVERY years instead of every step -- 220
@@ -219,12 +227,14 @@ def model_series(run_dir, masks, dx, prefer='auto', gates=None):
     elif (run_dir / 'snapshots.nc').exists() and not (run_dir / 'vti').exists():
         gen = frames_snapshots(run_dir)
     elif list((run_dir / 'vti').glob('*.pvd')) if (run_dir / 'vti').exists() else False:
-        gen = frames_vti(run_dir)          # yearly frames beat the decadal snapshots
+        gen = frames_vti(run_dir, t_read)  # yearly frames beat the decadal snapshots
     else:
         gen = frames_snapshots(run_dir)
     rows = []
     shape = next(iter(masks.values())).shape
     for t, H, smb, vel in gen:
+        if not _in(t, t_read):
+            continue
         if H.shape != shape:
             # a coarse-level run (frames on the run level): repeat onto the
             # level-0 grid, which conserves the area integrals exactly; the
@@ -282,7 +292,7 @@ def mankoff_annual(path):
 
 
 # ------------------------------------------------------------------- plots
-SCEN_COLOR = {'ssp126': 'tab:blue', 'ssp370': 'tab:orange', 'ssp585': 'tab:red'}
+SCEN_COLOR = {'ssp126': 'tab:blue', 'ssp370': 'tab:orange', 'ssp585': 'tab:red', 'ctrl': 'tab:gray'}
 # reserved for runs without a scenario (the standalone / OCX reference), kept
 # clear of SCEN_COLOR so the reference never collides with a projection
 PLAIN_COLOR = ('tab:green', 'tab:purple', 'tab:brown', 'tab:pink', 'tab:olive')
@@ -417,7 +427,7 @@ def main(args):
     for spec in args.run:
         name, path = spec.split('=', 1)
         print(f"reading {name} from {path}")
-        runs[name] = model_series(path, masks, dx, prefer=args.prefer, gates=gates)
+        runs[name] = model_series(path, masks, dx, prefer=args.prefer, gates=gates, t_read=args.t_read)
         runs[name].to_csv(out_dir / f'model_{name}.csv')
     for spec in args.run_csv:
         # a series this script wrote earlier (model_<name>.csv), for a run whose
@@ -441,7 +451,7 @@ def main(args):
                 w = (df.index >= lo) & (df.index <= hi)
                 row.update(model_Dgate=df[f'Dg_{r}'][w].mean(), model_MBgate=df[f'MBg_{r}'][w].mean(),
                            obs_D=obs[f'D_{r}'][(obs.index >= lo) & (obs.index <= hi)].mean(),
-                           obs_Dgate_1km=obs_gate[r])
+                           obs_Dgate_1km=obs_gate.get(r, np.nan))
             rows.append(row)
     S = pd.DataFrame(rows)
     S['model_D'] = S.model_SMB - S.model_MB
@@ -477,7 +487,10 @@ if __name__ == '__main__':
     ap.add_argument('--prefer', default='auto', choices=('auto', 'snapshots'),
                     help="'snapshots' forces snapshots.nc over the yearly VTI series (much faster "
                          "for projections, and enough for cumulative curves)")
+    ap.add_argument('--t-read', type=float, nargs=2, default=None, metavar=('T0', 'T1'),
+                    help="read only the frames in [T0, T1] (a 1850-2300 projection's yearly VTI series is 450 "
+                         "frames; the plots need only --t-range, plus one year before it for the first rate)")
     a = ap.parse_args()
-    if not a.run:
+    if not a.run and not a.run_csv:
         a.run = ['reference=domains/greenland/inverse_vinther_bedgrad/forward_standalone']
     main(a)

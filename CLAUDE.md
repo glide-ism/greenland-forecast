@@ -2769,6 +2769,78 @@ climate is another 1.7 K (annual) / 1.5 K (JJA) colder with 10% less precip.
   at a 600 m grounding line). Not yet reconciled -- glide should take the
   ratio from the config.
 
+- **ISMIP7 core submission (2026-09-30), `run_ismip7_core.py`.** 11 runs,
+  `inverse_v1.1/ismip7_core/` (manifest.json records the calibration and
+  refuses to mix): historical x {CESM2-WACCM, MRI-ESM2-0} from the config's
+  t_start (100) to 2015 (`--pre-record standalone`: the inversion's own
+  forcing before 1850, the GCM's historical from the ssp126 directory);
+  ssp126 / ssp585 / ctrl to 2301 and ssp370 to 2101 BRANCHED from that
+  historical at 2015 (`forward_projection --continue` on a copy: VTI frames
+  hard-linked, the appended files copied; thermal state and the elevation-
+  feedback reference carried; velocities restart from zero; `branched_from`
+  in the attrs); OCX to 2026. Configuration: the ISOTHERMAL v1.1
+  calibration, `calving_h0_base_v1.1_s1m2.nc`, alpha_h 80, tau 1, H_c 100,
+  A_glen 2e-17, one-way thermal output (library change 24:
+  `couple_rheology=False, surface_T="forcing"`, Q_geo 0.042). GCM forcing in
+  ANOMALY mode (`forward_projection` default since 2026-09-30): the
+  calibration's hybrid climatology (CARRA2 T + RACMO P) + tbias / pbias +
+  the GCM's departure from its own 1986-2025 climatology, which for EVERY
+  scenario of a GCM is the historical + ssp126 tail (checked: tas_clim /
+  pr_clim bit-identical across ssp126 / 370 / 585 / ctrl, and the 1850-2014
+  catalogue files identical across scenarios), so the scenarios differ only
+  from 2015. Raw mode (`--mode raw`) is kept as a sensitivity: dEBM2 is
+  3.5 K colder and 12 % drier than the calibration climatology, which pbias /
+  tbias were not fitted against. OCX runs `--record standalone`: every step
+  takes forward_standalone's compute_smb (the hybrid yearly fields 1986-2025,
+  the Vinther index before) + the elevation feedback through the
+  `ctx.t2m_offset` hook; the CARRA2_ocx directory supplies only the ocean TF
+  (the EN4 file). Its own tas / pr are CARRA2 in BOTH variables, 15 % wetter
+  than what pbias was fitted to -- the first OCX attempt ran on them and was
+  dropped. OCX is FREE-calving (the projections cannot be pinned; a pinned
+  state handed to the free law unwinds, library change 22).
+  **Consistency check, OCX vs the standalone free composite**
+  (`analysis/output/basin_mb_v1.1_ocx/`): annual steps from 1850 (standalone:
+  10-yr to 1990) change nothing at the fronts -- GrIS 2006-20 -299 vs -300,
+  1993-2019 -179 vs -180, gates 287 / 296 / 339 / 363 vs 286 / 293 / 340 / 363
+  (1990 / 2000 / 2010 / 2018), every key glacier within 1-2 % at 2018; only
+  1986-95 differs (-22 vs -33, 569 Gt less ice at 1986, probably the
+  standalone's single 1980-90 frame). The 1950-2025 TF variability does not
+  ratchet the fronts under annual stepping.
+  **Results** (`analysis/output/basin_mb_core_{cesm,all}/`, all curves and
+  Mankoff anchored on OCX at 1985; per-run series in `basin_mb_core_series/`,
+  read with `basin_mass_balance.py --t-read 1949 2151`): GCM runs start
+  above OCX at 1985 (CESM +4.2 kGt, MRI +1.2 kGt: 1850-1985 GCM anomalies vs
+  the Vinther index); GrIS dM/dt 2006-2025 -219..-280 Gt/yr vs Mankoff -223
+  (single decades are realization noise: CESM's three scenarios span
+  -243..-344 over 2015-25 with near-identical forcing; MRI's 1986-2006 is +18).
+  Sea-level contribution from 2015, mm SLE, CESM / MRI: ssp126 80 / 77 (2100),
+  131 / 82 (2150); ssp370 114 / 146 (2100); ssp585 144 / 173 (2100), 569 / 577
+  (2150); ctrl 38 / 28 (2100) -- ctrl's 120-164 Gt/yr is committed loss under
+  a climate 0.58 K above the reference, no further dynamical response.
+  THE USER'S READING (keep when writing up): under ssp585 NEGIS (NE) starts a
+  marine-ice-sheet retreat right after 2100 (NE -53..-62 kGt by 2150, rate up
+  to -1900 Gt/yr) whose RATE is set by the +250 m h0 cap -- the robust
+  statement is that NEGIS destabilizes, not how fast; expect small ensemble
+  spread to 2100 and enormous after. The totals sit high in ISMIP6 terms
+  because Mankoff / IMBIE sit near ISMIP6's 95th historical percentile; they
+  are mid-ensemble of the user's earlier PISM ensemble that also matched
+  Mankoff.
+  **Export** (`ismip_exporter.py`, 1 km, set C001, group UMT, model GLIDE):
+  `inverse_v1.1/ismip7_core/ISMIP7_submission/Models/GrIS/UMT/GLIDE/CORE/
+  C001/`, 396 files (11 x 36 incl. the five thermal variables), 167 GB,
+  ~80 MB and ~3.7 s per model year; OCX exported as experiment `ocx`, years
+  1986-2025 (the checker has no OCX row). ISMIP7 checker on CESM historical +
+  ssp585: 0 errors, 7 range WARNINGS, all genuine model values on tiny
+  fractions: strbasemag up to 1.6 MPa (beta_max cells; limit 1 MPa), topg
+  -4047 m (BedMachine, 15 values), xvel* just over 0.0008 m/s (ssp585), and
+  acabf down to -6.6e-4 kg m-2 s-1 (-22.7 m ice/yr) at x -211..-202,
+  y -3091..-3089 km in ssp585 2154-2165: thin near-sea-level ice in the
+  warmest, rain-shadowed corner of Greenland melting out under the elevation
+  feedback (user: expected there). The full 11-experiment check was started
+  2026-09-30 (`ismip7_core/logs/checker_full.log`, report in the C001
+  directory). Disk: the 11 runs take 330 GB (1 km yearly LZ4 VTI ~77 MB per
+  frame); the root filesystem filled during this work.
+
 ## Known gaps / follow-ups
 
 - **Spin-up length: what is actually needed (2026-09-22).** The point of the
