@@ -29,8 +29,8 @@ OUTPUT_PATH = config.output_dir
 # friction" update leaks onto the outlets through the beta prior (fast ice
 # 0.35 -> 0.22 of observed in one step); from v5 the descent is monotone.
 #WARM_START_PATH = None
-#WARM_START_PATH = f"{DOMAIN}/inverse_v14/level_0/torch_vars.p"  # None = from the prior
-#WARM_START_PATH = f"{DOMAIN}/inverse_v9/level_2/torch_vars.p"  # None = from the prior
+#WARM_START_PATH = f"{DOMAIN}/inverse_v1.1/level_0/torch_vars.p"  # None = from the prior
+#WARM_START_PATH = f"{DOMAIN}/inverse_v1.1thermal/level_0/torch_vars.p"  # None = from the prior
 WARM_START_PATH = f"{DOMAIN}/beta_init_force_balance.p"
 
 problem = GlacierProblem(config)
