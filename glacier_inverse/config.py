@@ -849,9 +849,12 @@ class GlacierConfig:
     # when it is migrated (noted in rto_sample.py).
     smb_data_influence: float = 1.0
 
-
-    influence_cap: dict = None,
-    influence_transfer: str = 'log',
+    # Bounded-influence cap on the whitened data score, {z_attr_name: C_z}
+    # per-mode in PRIOR-STD units, and its transfer function "tanh"
+    # (saturating bound) | "log" (C_z prior-stds per e-fold of demand).
+    # See CLAUDE.md and loss.apply_influence_control.
+    influence_cap: Optional[dict] = None
+    influence_transfer: str = "log"
 
     # Scalar prior mean of the log_beta field: the Matern prior (and its
     # whitened representation) applies to log_beta - mu_log_beta, so the

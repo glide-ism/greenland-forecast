@@ -471,9 +471,12 @@ def main() -> int:
               abs(m2 - 1.0) < 0.2, f"mean(z²) = {m2:.3f}")
         # randomized() perturbs by a correlated field with the model's marginal std.
         pert = srf_w.randomized(eps_S=eps).S_obs - srf_w.S_obs
-        check("randomized() perturbation has marginal std ≈ noise.sigma",
-              abs(pert.std().item() / noise.sigma - 1.0) < 0.25,
-              f"std = {pert.std().item():.2f} (sigma = {noise.sigma})")
+        # Marginal std of the Matern + nugget model: sqrt(sigma^2 + nugget^2)
+        # (the domain's own srf model may carry a nugget).
+        _sd = (noise.sigma ** 2 + (getattr(noise, "nugget", 0.0) or 0.0) ** 2) ** 0.5
+        check("randomized() perturbation has marginal std ≈ sqrt(sigma² + nugget²)",
+              abs(pert.std().item() / _sd - 1.0) < 0.25,
+              f"std = {pert.std().item():.2f} (sigma = {noise.sigma}, marginal = {_sd:.2f})")
 
         # Nugget path: the spectral operator reproduces ggapp's stencil at
         # nugget = 0 and is an exact self-inverse pair with a nugget.
