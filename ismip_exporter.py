@@ -103,7 +103,7 @@ ISM_MEMBER, FORCING_ID = "m001", "f001"
 # holds it; run_ismip7_core.py passes it), each in its own directory
 # Models/GrIS/<group>/<model>/CORE/<set>/ (the checker's --source-path).
 EXPERIMENTS = {"historical": (1850, 2014), "ssp370": (2015, 2100), "ssp126": (2015, 2300),
-               "ssp585": (2015, 2300), "ctrl": (2015, 2300)}
+               "ssp585": (2015, 2300), "ctrl": (2015, 2300), "ssp534-over": (2015, 2300)}
 # non-mandatory variables this model does not represent (-> not_modelled.txt)
 NOT_MODELLED = {"hfgeoubed": "no thermal model: the enthalpy model is the surface only",
                 "zvelsurf": "vertical velocities are not diagnosed", "zvelbase": "vertical velocities are not diagnosed",

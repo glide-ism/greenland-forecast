@@ -12,6 +12,18 @@ protocol's table assigns a counter per (experiment, ESM):
     C009 ctrl       CESM2-WACCM    C010 ctrl       MRI-ESM2-0
     C011 ocx        (any ESM field; ours is CARRA2)
 
+the overshoot pair:
+
+    E001 ssp534-over CESM2-WACCM   E002 ssp534-over MRI-ESM2-0
+
+and the expanded suite (historical + ssp370 only):
+
+    E003 historical ACCESS-CM2     E004 ssp370 ACCESS-CM2
+    E005 historical CanESM5        E006 ssp370 CanESM5
+    E007 historical GFDL-ESM4      E008 ssp370 GFDL-ESM4
+    E009 historical IPSL-CM6A-LR   E010 ssp370 IPSL-CM6A-LR
+    E011 historical MPI-ESM1-2-HR  E012 ssp370 MPI-ESM1-2-HR
+
 For every .nc under <CORE>/*/ the script parses the file name
 <var>_<domain>_<group>_<model>_<member>_<esm>_<forcing>_<experiment>_<set>_<period>.nc,
 replaces the set field, MOVES the file to <CORE>/<new set>/ (os.rename: same
@@ -39,6 +51,12 @@ COUNTERS = {
     ("ssp126", "CESM2-WACCM"): "C005", ("ssp126", "MRI-ESM2-0"): "C006",
     ("ssp585", "CESM2-WACCM"): "C007", ("ssp585", "MRI-ESM2-0"): "C008",
     ("ctrl", "CESM2-WACCM"): "C009", ("ctrl", "MRI-ESM2-0"): "C010",
+    ("ssp534-over", "CESM2-WACCM"): "E001", ("ssp534-over", "MRI-ESM2-0"): "E002",
+    ("historical", "ACCESS-CM2"): "E003", ("ssp370", "ACCESS-CM2"): "E004",
+    ("historical", "CanESM5"): "E005", ("ssp370", "CanESM5"): "E006",
+    ("historical", "GFDL-ESM4"): "E007", ("ssp370", "GFDL-ESM4"): "E008",
+    ("historical", "IPSL-CM6A-LR"): "E009", ("ssp370", "IPSL-CM6A-LR"): "E010",
+    ("historical", "MPI-ESM1-2-HR"): "E011", ("ssp370", "MPI-ESM1-2-HR"): "E012",
 }
 OCX_COUNTER = "C011"
 

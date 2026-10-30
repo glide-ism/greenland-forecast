@@ -5,6 +5,7 @@ the one GPU, resumably, and optionally export each to the submission layout.
 
     historical  x {CESM2-WACCM, MRI-ESM2-0}   config t_start -> 2015
     ssp126, ssp585, ctrl                        branched at 2015 -> 2301
+    ssp534-over (ESM experiments E001 / E002)   branched at 2015 -> 2301
     ssp370                                      branched at 2015 -> 2101
     ocx (CARRA2 year by year)                   config t_start -> 2026
 
@@ -37,6 +38,23 @@ is skipped; an unfinished job directory is MOVED aside to
 <dir>.unfinished-<timestamp> (not deleted) and redone; a branch is redone from
 a fresh copy of its historical run.
 
+Expanded suite (2026-10-27): --gcms / --scenarios / --no-ocx select other
+GCMs and a subset of the branches, e.g. the historical + ssp370 runs of the
+additional kit GCMs:
+
+  python run_ismip7_core.py --gcms ACCESS-CM2 --scenarios ssp370 --no-ocx
+
+They need model_inputs/ismip7/<gcm>_<scenario>/ (make_ismip7_forcing.py). A
+GCM without ssp126 in the kit reads its historical record from the FIRST
+scenario requested (hist_forcing) -- the scenario that also supplies its
+anomaly reference's 2015-2025 tail (make_ismip7_forcing.py falls back to the
+scenario itself when ssp126 is absent), so historical and branch share one
+reference. Exports take their set counter from
+tools/ismip7_set_counters.COUNTERS (E003-E012 for the expanded suite: E003 /
+E004 ACCESS-CM2 historical / ssp370, then CanESM5, GFDL-ESM4, IPSL-CM6A-LR,
+MPI-ESM1-2-HR in pairs); a GCM missing there is skipped at export unless
+--set-counter is given (which forces ONE counter on every export of the call).
+
 Usage:
   python run_ismip7_core.py --dry-run                      # the plan and the commands
   python run_ismip7_core.py                                # all 11, in dependency order
@@ -64,22 +82,32 @@ from ismip7_set_counters import counter_for  # noqa: E402  (the per-experiment s
 PY = sys.executable
 DOMAIN = "domains/greenland"
 GCMS = ("CESM2-WACCM", "MRI-ESM2-0")
-BRANCHES = {"ssp126": 2301.0, "ssp370": 2101.0, "ssp585": 2301.0, "ctrl": 2301.0}
-HIST_FORCING = "ssp126"            # the historical record is read from this scenario's directory
+BRANCHES = {"ssp126": 2301.0, "ssp370": 2101.0, "ssp585": 2301.0, "ctrl": 2301.0, "ssp534-over": 2301.0}
+HIST_FORCING = "ssp126"            # the historical record is read from this scenario's directory (if built)
 HIST_END = 2015.0                  # nominal year 2014 = the step (2014, 2015]; the branch point
 OCX_END = 2026.0                   # CARRA2 1986-2025
 
 
-def plan():
+def hist_forcing(gcm, scenarios):
+    """The scenario directory the GCM's historical run reads: HIST_FORCING when
+    its product is built, else the first requested scenario (the expanded-suite
+    GCMs have no ssp126; their anomaly reference comes from that scenario)."""
+    if (HERE / DOMAIN / "model_inputs" / "ismip7" / f"{gcm}_{HIST_FORCING}" / "catalogue.json").exists():
+        return HIST_FORCING
+    return scenarios[0]
+
+
+def plan(gcms=GCMS, scenarios=tuple(BRANCHES), ocx=True):
     jobs = []
-    for g in GCMS:
-        jobs.append(dict(name=f"historical_{g}", gcm=g, scenario=HIST_FORCING, experiment="historical",
+    for g in gcms:
+        jobs.append(dict(name=f"historical_{g}", gcm=g, scenario=hist_forcing(g, scenarios), experiment="historical",
                          t_end=HIST_END, parent=None, pre_record="standalone", record="ismip7"))
-        for sc, t_end in BRANCHES.items():
-            jobs.append(dict(name=f"{sc}_{g}", gcm=g, scenario=sc, experiment=sc, t_end=t_end,
+        for sc in scenarios:
+            jobs.append(dict(name=f"{sc}_{g}", gcm=g, scenario=sc, experiment=sc, t_end=BRANCHES[sc],
                              parent=f"historical_{g}", pre_record="standalone", record="ismip7"))
-    jobs.append(dict(name="ocx_CARRA2", gcm="CARRA2", scenario="ocx", experiment="ocx", t_end=OCX_END,
-                     parent=None, pre_record="standalone", record="standalone"))
+    if ocx:
+        jobs.append(dict(name="ocx_CARRA2", gcm="CARRA2", scenario="ocx", experiment="ocx", t_end=OCX_END,
+                         parent=None, pre_record="standalone", record="standalone"))
     return jobs
 
 
@@ -141,6 +169,10 @@ def provenance(cfg, mode):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=None, help="run root (default: {config.output_dir}/ismip7_core)")
+    ap.add_argument("--gcms", nargs="+", default=list(GCMS), help=f"GCMs (default {' '.join(GCMS)})")
+    ap.add_argument("--scenarios", nargs="+", default=list(BRANCHES), choices=list(BRANCHES),
+                    help="branches to run (default all); the historical of each GCM always runs")
+    ap.add_argument("--no-ocx", action="store_true", help="leave out the OCX run")
     ap.add_argument("--only", nargs="*", default=None, help="job names (their parents run too when unfinished)")
     ap.add_argument("--level", type=int, default=0)
     ap.add_argument("--mode", default="anomaly", choices=("anomaly", "raw"),
@@ -155,7 +187,7 @@ def main():
     ap.add_argument("--resolution", type=float, default=1000.0)
     ap.add_argument("--set-counter", default=None,
                     help="force one set counter for every export (default: the protocol's per-experiment table, "
-                         "tools/ismip7_set_counters.py: C001 historical CESM ... C011 OCX)")
+                         "tools/ismip7_set_counters.py: C001 historical CESM ... C011 OCX, E003-E012 expanded suite)")
     ap.add_argument("--submission-dir", default=None, help="default: {root}/ISMIP7_submission")
     a = ap.parse_args()
 
@@ -182,7 +214,11 @@ def main():
     if prov["calving"]["pin_front"] not in ("None", "") or prov["calving"]["pin_front_filename"] not in ("None", ""):
         print("  NOTE: the config carries a front pin; forward_projection refuses a pin, so the runs will fail")
 
-    jobs = plan()
+    jobs = plan(a.gcms, a.scenarios, ocx=not a.no_ocx)
+    for g in a.gcms:
+        for sc in {hist_forcing(g, a.scenarios), *a.scenarios}:
+            if not (HERE / DOMAIN / "model_inputs" / "ismip7" / f"{g}_{sc}" / "catalogue.json").exists():
+                print(f"  WARNING: no model_inputs/ismip7/{g}_{sc} (make_ismip7_forcing.py --gcm {g} --scenario {sc})")
     by_name = {j["name"]: j for j in jobs}
     want = set(a.only) if a.only else set(by_name)
     unknown = want - set(by_name)
@@ -242,9 +278,12 @@ def main():
                     if not a.keep_going:
                         sys.exit(f"stopping: see {log} (rerun to resume; --keep-going to carry on past failures)")
                     continue
-        if (a.export or a.export_only) and finished(d, j["t_end"]):
+        counter = a.set_counter or counter_for(j["experiment"], j["gcm"])
+        if (a.export or a.export_only) and finished(d, j["t_end"]) and counter is None:
+            print(f"  export skipped: no set counter for {j['experiment']} / {j['gcm']} (pass --set-counter)")
+        elif (a.export or a.export_only) and finished(d, j["t_end"]):
             ecmd = [PY, "ismip_exporter.py", "--run-dir", str(d), "--experiment", j["experiment"],
-                    "--esm", j["gcm"], "--resolution", f"{a.resolution:g}", "--set-counter", a.set_counter or counter_for(j["experiment"], j["gcm"]),
+                    "--esm", j["gcm"], "--resolution", f"{a.resolution:g}", "--set-counter", counter,
                     "--submission-dir", str(Path(a.submission_dir) if a.submission_dir else root / "ISMIP7_submission")]
             if j["experiment"] == "ocx":       # not in the exporter's / checker's experiment table
                 ecmd += ["--years", "1986", "2025"]

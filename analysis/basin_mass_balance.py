@@ -214,12 +214,63 @@ def frames_series_nc(run_dir):
     nc.close()
 
 
+def basin_row(H, smb, vel, masks, dx, gates=None):
+    """M_r (Gt), SMB_r (Gt/yr) and, with `gates`, Dg_r (Gt/yr) of one frame:
+    the per-frame integrals of the docstring, on the level-0 grid. Shared by
+    model_series and forward runs that log them every step
+    (run_forcing_swap.py)."""
+    row = {}
+    ice = H > H_MIN
+    for r, m in masks.items():
+        row[f'M_{r}'] = float((H * (ice & m)).sum()) * dx * dx * RHO_I / 1e12
+        row[f'SMB_{r}'] = float((smb * (ice & m)).sum()) * dx * dx * RHO_I / 1e12 if smb is not None else np.nan
+    if gates is not None:
+        dg = gate_discharge(H, vel[0], vel[1], gates) if vel is not None else {r: np.nan for r in REGIONS}
+        for r in REGIONS:
+            row[f'Dg_{r}'] = dg[r]
+    return row
+
+
+def finish_series(df, gates=False):
+    """MB_r from the mass differences, the GrIS sums and (gates) MBg_r on a
+    time-indexed frame of basin_row columns."""
+    for r in REGIONS:
+        df[f'MB_{r}'] = df[f'M_{r}'].diff() / pd.Series(df.index, index=df.index).diff()
+    for k in ('M', 'SMB', 'MB') + (('Dg',) if gates else ()):
+        df[f'{k}_GrIS'] = df[[f'{k}_{r}' for r in REGIONS]].sum(axis=1, min_count=1)
+    if gates:
+        # the Mankoff-comparable mass balance: SMB minus the GATE flux, i.e.
+        # the budget of the ice upstream of the gates, which is what their
+        # MB = SMB - D - BMB is. The residual SMB - dM/dt counts everything
+        # downstream of the gates as discharge too.
+        for r in REGIONS + ['GrIS']:
+            df[f'MBg_{r}'] = df[f'SMB_{r}'] - df[f'Dg_{r}']
+    return df
+
+
+def scalars_series(run_dir, t_read=None):
+    """The model_series frame from a run that logged basin_row every step in
+    its scalars.csv (run_forcing_swap.py): no field reads at all."""
+    df = pd.read_csv(Path(run_dir) / 'scalars.csv').set_index('time').sort_index()
+    if t_read is not None:
+        df = df[(df.index >= t_read[0] - 1e-6) & (df.index <= t_read[1] + 1e-6)]
+    cols = [f'{k}_{r}' for k in ('M', 'SMB', 'Dg') for r in REGIONS if f'{k}_{r}' in df]
+    if f'M_{REGIONS[0]}' not in df:
+        raise ValueError(f'{run_dir}/scalars.csv has no basin columns (M_NO, ...)')
+    return finish_series(df[cols].copy(), gates=f'Dg_{REGIONS[0]}' in df)
+
+
 def model_series(run_dir, masks, dx, prefer='auto', gates=None, t_read=None):
     """`prefer`: 'auto' takes the finest source available (series.nc, then
     yearly VTI, then snapshots); 'snapshots' forces snapshots.nc, which for a
     projection is every SNAPSHOT_EVERY years instead of every step -- 220
-    reads instead of 522, and plenty for a cumulative curve."""
+    reads instead of 522, and plenty for a cumulative curve. A run that
+    logged the basin integrals every step (scalars.csv with M_NO, ...) is
+    read from those under 'auto'."""
     run_dir = Path(run_dir)
+    sc = run_dir / 'scalars.csv'
+    if prefer == 'auto' and sc.exists() and f'M_{REGIONS[0]}' in sc.open().readline().split(','):
+        return scalars_series(run_dir, t_read)
     if prefer == 'snapshots' and (run_dir / 'snapshots.nc').exists():
         gen = frames_snapshots(run_dir)
     elif (run_dir / 'series.nc').exists():
@@ -244,31 +295,11 @@ def model_series(run_dir, masks, dx, prefer='auto', gates=None, t_read=None):
                                                                                     :shape[1] + (a.shape[1] - nx0) * f]
             H, smb = up(H), up(smb)
             vel = None if vel is None else tuple(up(v) for v in vel)
-        row = {'time': t}
-        ice = H > H_MIN
-        for r, m in masks.items():
-            row[f'M_{r}'] = float((H * (ice & m)).sum()) * dx * dx * RHO_I / 1e12
-            row[f'SMB_{r}'] = float((smb * (ice & m)).sum()) * dx * dx * RHO_I / 1e12 if smb is not None else np.nan
-        if gates is not None:
-            dg = gate_discharge(H, vel[0], vel[1], gates) if vel is not None else {r: np.nan for r in REGIONS}
-            for r in REGIONS:
-                row[f'Dg_{r}'] = dg[r]
-        rows.append(row)
+        rows.append({'time': t, **basin_row(H, smb, vel, masks, dx, gates)})
         print(f"  {run_dir.name}: t={t:.1f}", end='\r', flush=True)
     print()
     df = pd.DataFrame(rows).set_index('time').sort_index()
-    for r in REGIONS:
-        df[f'MB_{r}'] = df[f'M_{r}'].diff() / pd.Series(df.index, index=df.index).diff()
-    for k in ('M', 'SMB', 'MB') + (('Dg',) if gates is not None else ()):
-        df[f'{k}_GrIS'] = df[[f'{k}_{r}' for r in REGIONS]].sum(axis=1, min_count=1)
-    if gates is not None:
-        # the Mankoff-comparable mass balance: SMB minus the GATE flux, i.e.
-        # the budget of the ice upstream of the gates, which is what their
-        # MB = SMB - D - BMB is. The residual SMB - dM/dt counts everything
-        # downstream of the gates as discharge too.
-        for r in REGIONS + ['GrIS']:
-            df[f'MBg_{r}'] = df[f'SMB_{r}'] - df[f'Dg_{r}']
-    return df
+    return finish_series(df, gates=gates is not None)
 
 
 def mankoff_annual(path):

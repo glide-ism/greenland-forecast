@@ -268,6 +268,12 @@ def build_ismip7_forcing(domain_path, gcm: str, scenario: str, atm: str = 'dEBM2
         ref_scen = clim_scenario
         if ref_scen is None:
             ref_scen = CLIM_REF_SCENARIO if scenario.startswith('ssp') else scenario
+            if ref_scen != scenario and not _scan(ismip7_dir, gcm, ref_scen, atm, 'tas'):
+                # the expanded-suite GCMs have historical + ssp370 only: with one
+                # scenario per GCM its own tail is the shared reference trivially
+                print(f"NOTE: no {gcm} {ref_scen} in the kit; the anomaly reference takes its tail from "
+                      f"{scenario} itself (consistent only while it is {gcm}'s sole scenario)")
+                ref_scen = scenario
         clim_cat = cat['years']
         if ref_scen not in (scenario, 'self'):
             clim_cat = build_catalogue(ismip7_dir, gcm, ref_scen, atm, ocean)['years']
